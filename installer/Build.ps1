@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.3.0',
+    [string]$Version = '0.3.1',
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,
@@ -68,6 +68,55 @@ function Get-InnoCompiler {
     return $compiler
 }
 
+function Test-PinnedArchive([string]$Path, [long]$Length, [string]$Hash) {
+    $file = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    return ($null -ne $file -and -not $file.PSIsContainer -and
+        -not ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $file.Length -eq $Length -and
+        (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -eq $Hash)
+}
+
+function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
+    $json = & $Python -I -B -c 'import json, runpy, sys; m = runpy.run_path(sys.argv[1]); print(json.dumps({k: m[k] for k in ("VERSION", "ASSET", "ASSET_URL", "ASSET_SIZE", "ASSET_SHA256")}))' $LoginSource
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned Wrapper Lite release.' }
+    $pin = $json | ConvertFrom-Json
+    $name = "wrapper-$($pin.VERSION)-windows-x86_64.zip"
+    $url = "https://github.com/itouakirai/wrapper/releases/download/$($pin.VERSION)/$name"
+    if ($pin.VERSION -notmatch '^v\d+\.\d+\.\d+$' -or $pin.ASSET -cne $name -or $pin.ASSET_URL -cne $url -or
+        $pin.ASSET_SIZE -le 0 -or $pin.ASSET_SHA256 -notmatch '^[a-f0-9]{64}$') {
+        throw 'The Wrapper Lite release pin is invalid.'
+    }
+    if ($WrapperLiteArchive) {
+        if (-not (Test-PinnedArchive $WrapperLiteArchive $pin.ASSET_SIZE $pin.ASSET_SHA256)) {
+            throw 'Wrapper Lite archive does not match the pinned official release.'
+        }
+        return [pscustomobject]@{ Name = $name; FullName = (Get-Item -LiteralPath $WrapperLiteArchive).FullName }
+    }
+
+    $cached = Join-Path $buildTools $name
+    if (Test-PinnedArchive $cached $pin.ASSET_SIZE $pin.ASSET_SHA256) {
+        return [pscustomobject]@{ Name = $name; FullName = $cached }
+    }
+    if ((Test-Path -LiteralPath $cached) -and -not (Test-Path -LiteralPath $cached -PathType Leaf)) {
+        throw "Expected a file at the Wrapper Lite cache path: $cached"
+    }
+    $partial = Join-Path $buildTools "$name.$([Guid]::NewGuid().ToString('N')).partial"
+    try {
+        $localArchive = Join-Path ([IO.Path]::GetTempPath()) "AMDL-wrapper-$($pin.VERSION)-auth-smoke\wrapper.zip"
+        if (Test-PinnedArchive $localArchive $pin.ASSET_SIZE $pin.ASSET_SHA256) {
+            Copy-Item -LiteralPath $localArchive -Destination $partial
+        } else {
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $partial
+        }
+        if (-not (Test-PinnedArchive $partial $pin.ASSET_SIZE $pin.ASSET_SHA256)) {
+            throw 'The downloaded Wrapper Lite archive failed the pinned size or SHA-256 check.'
+        }
+        Move-Item -LiteralPath $partial -Destination $cached -Force
+        return [pscustomobject]@{ Name = $name; FullName = $cached }
+    } finally {
+        if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial }
+    }
+}
+
 $sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py',
     'music_catalog.py', 'music_library.py', 'music_browser.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
@@ -88,19 +137,6 @@ try {
     }
     $assets = Join-Path $studio 'assets'
     if (Test-Path -LiteralPath $assets -PathType Container) { Copy-SafeTree $assets (Join-Path $stage 'assets') }
-    if ($WrapperLiteArchive) {
-        $archive = Get-Item -LiteralPath $WrapperLiteArchive
-        $expected = 'B5E3C4CE7263F76AC9AE43F0DA9BFA9279AE5E1A0D660D13B6967E3E0158E9C8'
-        if ($archive.PSIsContainer -or $archive.Length -ne 158565274 -or
-            (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash -ne $expected) {
-            throw 'Wrapper Lite archive does not match the pinned official release.'
-        }
-        $wrapperBundle = Join-Path $stage 'wrapper-lite'
-        [void][IO.Directory]::CreateDirectory($wrapperBundle)
-        Copy-Item -LiteralPath $archive.FullName -Destination (
-            Join-Path $wrapperBundle 'wrapper-v3.0.4-windows-x86_64.zip')
-    }
-
     $runtime = Join-Path $stage 'runtime'
     [void][IO.Directory]::CreateDirectory($runtime)
     foreach ($file in @('python.exe', 'pythonw.exe', 'python3.dll', 'python312.dll', 'vcruntime140.dll',
@@ -122,8 +158,12 @@ try {
             Copy-Item -LiteralPath $item.FullName -Destination $runtimeLib
         }
     }
-    & (Join-Path $runtime 'python.exe') -I -B -c 'import ssl; ssl.create_default_context()'
-    if ($LASTEXITCODE -ne 0) { throw 'The packaged Python runtime could not initialize TLS.' }
+    $python = Join-Path $runtime 'python.exe'
+
+    $archive = Get-WrapperLiteArchive $python (Join-Path $stage 'login_service.py')
+    $wrapperBundle = Join-Path $stage 'wrapper-lite'
+    [void][IO.Directory]::CreateDirectory($wrapperBundle)
+    Copy-Item -LiteralPath $archive.FullName -Destination (Join-Path $wrapperBundle $archive.Name)
 
     $lib = Join-Path $stage 'lib'
     [void][IO.Directory]::CreateDirectory($lib)
@@ -137,6 +177,8 @@ try {
             throw "Python dependency missing: $file"
         }
     }
+    & $python -I -B -c 'import ssl, sys, tkinter; sys.path.insert(0, sys.argv[1]); import Studio; Studio.configure_windows(); ssl.create_default_context(); tkinter.Tcl()' $stage
+    if ($LASTEXITCODE -ne 0) { throw 'The packaged application could not initialize its TLS and Tcl/Tk runtime.' }
 
     $backend = Join-Path $stage 'backend'
     $relativeBridge = '_internal\backend\bin\bridge'
@@ -154,19 +196,6 @@ try {
         'libsslMD.dll', 'OpenSVCDecoder.dll', 'avcodec-60.dll', 'avdevice-60.dll', 'avfilter-9.dll',
         'avformat-60.dll', 'avutil-58.dll', 'postproc-57.dll', 'swresample-4.dll', 'swscale-7.dll')) {
         Copy-Item -LiteralPath (Join-Path $AudioTools $file) -Destination $media
-    }
-
-    $wslLauncher = Join-Path $workspace 'wsl1\LxRunOffline.exe'
-    if (Test-Path -LiteralPath $wslLauncher -PathType Leaf) {
-        $wsl = Join-Path $stage 'wsl1'
-        [void][IO.Directory]::CreateDirectory($wsl)
-        Copy-Item -LiteralPath $wslLauncher -Destination $wsl
-        $license = Join-Path $buildTools 'LxRunOffline-LICENSE.txt'
-        if (-not (Test-Path -LiteralPath $license -PathType Leaf)) {
-            $url = 'https://raw.githubusercontent.com/DDoSolitary/LxRunOffline/bdc6d7d77f886c6dcdab3b4c9c136557ca6694c4/LICENSE'
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $license
-        }
-        Copy-Item -LiteralPath $license -Destination $wsl
     }
 
     $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

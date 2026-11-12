@@ -33,6 +33,10 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 CHUNK = 1024 * 1024
 
 
+class _EarlyBootExit(RuntimeError):
+    pass
+
+
 def _cancelled(stop):
     if stop.is_set():
         raise RuntimeError("已取消启动本地登录服务。")
@@ -195,6 +199,18 @@ class LoginService:
             connection.close()
 
     def start(self, stop, on_status):
+        for attempt in range(2):
+            _cancelled(stop)
+            try:
+                return self._start_once(stop, on_status)
+            except _EarlyBootExit:
+                if attempt:
+                    raise RuntimeError("Wrapper Lite 启动失败，请检查组件或磁盘空间。") from None
+                _cancelled(stop)
+                on_status("正在重试启动登录服务…")
+                stop.wait(0.5)
+
+    def _start_once(self, stop, on_status):
         with self.lock:
             _cancelled(stop)
             if self.status()["running"]:
@@ -240,7 +256,7 @@ class LoginService:
                 while time.monotonic() < deadline:
                     _cancelled(stop)
                     if self.process.poll() is not None:
-                        raise RuntimeError("Wrapper Lite 启动失败，请检查组件或磁盘空间。")
+                        raise _EarlyBootExit()
                     try:
                         check = self._api("GET", "/api/overview", timeout=1)
                         overview = check.get("data")

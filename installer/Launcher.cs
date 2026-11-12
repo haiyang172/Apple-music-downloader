@@ -33,14 +33,11 @@ internal static class Launcher
             var info = new ProcessStartInfo
             {
                 FileName = python,
-                Arguments = "-B \"" + studio + "\"",
+                Arguments = "-E -s -B \"" + studio + "\"",
                 WorkingDirectory = home,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            info.EnvironmentVariables.Remove("PYTHONHOME");
-            info.EnvironmentVariables["PYTHONPATH"] = Path.Combine(home, "lib");
-            info.EnvironmentVariables["PYTHONNOUSERSITE"] = "1";
             using (Process process = Process.Start(info))
             {
                 if (process == null)

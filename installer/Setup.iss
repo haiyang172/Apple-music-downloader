@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.3.1"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "dist\amdl"
@@ -25,6 +25,10 @@ Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern dynamic
 UsePreviousTasks=no
+UsePreviousAppDir=not IsExtractMode
+UsePreviousGroup=not IsExtractMode
+Uninstallable=not IsExtractMode
+CreateUninstallRegKey=not IsExtractMode
 #if FileExists(PayloadDir + "\assets\AMDLStudio.ico")
 SetupIconFile={#PayloadDir}\assets\AMDLStudio.ico
 #endif
@@ -38,74 +42,54 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:DesktopIcon}"; Flags: unchecked
-Name: "enablewsl"; Description: "{cm:EnableWsl}"; Flags: unchecked; Check: CanOfferWsl
 
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
-Type: files; Name: "{autoprograms}\AMDL Studio.lnk"
-Type: files; Name: "{autodesktop}\AMDL Studio.lnk"
-Type: files; Name: "{app}\AMDLStudio.exe"
+Type: files; Name: "{autoprograms}\AMDL Studio.lnk"; Check: not IsExtractMode
+Type: files; Name: "{autodesktop}\AMDL Studio.lnk"; Check: not IsExtractMode
+Type: files; Name: "{app}\AMDLStudio.exe"; Check: not IsExtractMode
 
 [Icons]
-Name: "{autoprograms}\amdl"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"
-Name: "{autodesktop}\amdl"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon
+Name: "{autoprograms}\amdl"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Check: not IsExtractMode
+Name: "{autodesktop}\amdl"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon; Check: not IsExtractMode
 
 [Run]
-Filename: "{app}\amdl.exe"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\amdl.exe"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsExtractMode
 
 [CustomMessages]
 zhcn.DesktopIcon=创建桌面快捷方式
 english.DesktopIcon=Create a desktop shortcut
-zhcn.EnableWsl=启用 Windows 的 WSL 1 组件（ALAC、Atmos 本地服务可选，需要管理员权限）
-english.EnableWsl=Enable the Windows WSL 1 component for the optional ALAC and Atmos service (requires administrator permission)
 zhcn.LaunchStudio=打开 amdl
 english.LaunchStudio=Open amdl
-zhcn.WslProgress=正在启用 Windows 的 WSL 1 组件…
-english.WslProgress=Enabling the Windows WSL 1 component…
-zhcn.WslDeclined=amdl 已安装。WSL 1 组件启用已取消，可在“启用或关闭 Windows 功能”中重试。
-english.WslDeclined=amdl is installed. WSL 1 setup was cancelled. You can retry from Turn Windows features on or off.
-zhcn.WslFailed=amdl 已安装。WSL 1 组件启用失败（退出代码 %1），可在“启用或关闭 Windows 功能”中重试。
-english.WslFailed=amdl is installed. Enabling WSL 1 failed (exit code %1). You can retry from Turn Windows features on or off.
-zhcn.WslRestart=WSL 1 组件已启用。请在方便时重启 Windows 以完成配置。
-english.WslRestart=The WSL 1 component is enabled. Restart Windows when convenient to finish setup.
 
 [Code]
-const
-  LxssKey = 'Software\Microsoft\Windows\CurrentVersion\Lxss';
-
-function CanOfferWsl: Boolean;
-var
-  Entries: TArrayOfString;
-  Index: Integer;
-  Name: String;
+function IsExtractMode: Boolean;
 begin
-  Result := FileExists(ExpandConstant('{sys}\dism.exe'));
-  if Result and RegGetSubkeyNames(HKCU, LxssKey, Entries) then
-    for Index := 0 to GetArrayLength(Entries) - 1 do
-      if RegQueryStringValue(HKCU, LxssKey + '\' + Entries[Index], 'DistributionName', Name) then
-        if CompareText(Name, 'u22-amdl') = 0 then
-        begin
-          Result := False;
-          Exit;
-        end;
+  Result := ExpandConstant('{param:EXTRACTONLY|0}') = '1';
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+function InitializeSetup: Boolean;
 var
-  ExitCode: Integer;
+  Destination: String;
+  Entry: TFindRec;
 begin
-  if (CurStep <> ssPostInstall) or not WizardIsTaskSelected('enablewsl') or WizardSilent then
+  Result := True;
+  if not IsExtractMode then
     Exit;
-
-  WizardForm.StatusLabel.Caption := CustomMessage('WslProgress');
-  if not ShellExec('runas', ExpandConstant('{sys}\dism.exe'),
-    '/online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart',
-    '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
-    MsgBox(CustomMessage('WslDeclined'), mbInformation, MB_OK)
-  else if ExitCode = 3010 then
-    MsgBox(CustomMessage('WslRestart'), mbInformation, MB_OK)
-  else if ExitCode <> 0 then
-    MsgBox(FmtMessage(CustomMessage('WslFailed'), [IntToStr(ExitCode)]), mbInformation, MB_OK);
+  Destination := ExpandConstant('{param:DIR|}');
+  Result := WizardSilent and PathIsRooted(Destination) and DirExists(Destination);
+  if Result and FindFirst(AddBackslash(Destination) + '*', Entry) then
+  try
+    repeat
+      if (Entry.Name <> '.') and (Entry.Name <> '..') then
+      begin
+        Result := False;
+        Break;
+      end;
+    until not FindNext(Entry);
+  finally
+    FindClose(Entry);
+  end;
 end;

@@ -39,6 +39,8 @@ INK = "#152d32"
 MUTED = "#486367"
 NAV = "#102b31"
 NAV_ACTIVE = "#24524f"
+NAV_ACCOUNT = "#1b3b40"
+NAV_SIGNED_IN = "#a3f6dc"
 ACCENT = "#11715e"
 BORDER = "#c9d9d5"
 
@@ -59,6 +61,14 @@ def find_backend():
 def configure_windows():
     if os.name != "nt":
         return
+    bundled_tcl = ROOT / "runtime" / "tcl"
+    for variable, directory, entry in (
+        ("TCL_LIBRARY", "tcl8.6", "init.tcl"),
+        ("TK_LIBRARY", "tk8.6", "tk.tcl"),
+    ):
+        library = bundled_tcl / directory
+        if (library / entry).is_file():
+            os.environ[variable] = str(library)
     try:
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         set_app_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
@@ -222,6 +232,7 @@ class Studio:
         self.quality_label = tk.StringVar(window, QUALITY[self.fields["quality"].get()])
         self.output_label = tk.StringVar(window, audio.OUTPUTS[self.fields["output"].get()])
         self.account_status = tk.StringVar(window)
+        self.profile_text = tk.StringVar(window, "登录")
         self.path_summary = tk.StringVar(window)
         self.status = tk.StringVar(window, load_error or "就绪")
         self.engine_status = tk.StringVar(window)
@@ -253,23 +264,7 @@ class Studio:
         self.font = "Inter" if "Inter" in installed_fonts else "Segoe UI"
         self.configure_style()
 
-        rail = tk.Frame(window, background=NAV, width=round(148 * self.scale))
-        rail.grid(row=0, column=0, sticky="ns")
-        rail.grid_propagate(False)
-        rail.columnconfigure(0, weight=1)
-        rail.rowconfigure(7, weight=1)
-        mark = ROOT / "assets" / "amdl-32.png"
-        self.brand_icon = tk.PhotoImage(file=mark) if mark.is_file() else None
-        tk.Label(rail, text=APP_TITLE, image=self.brand_icon, compound="left", padx=4,
-                 font=(self.font, 19, "bold"), background=NAV, foreground="white").grid(
-            row=0, column=0, padx=13, pady=(24, 23), sticky="w")
-        for row, (key, label) in enumerate(PAGES.items(), 1):
-            button = tk.Button(rail, text=label, command=lambda page=key: self.show(page),
-                               background=NAV, activebackground=NAV_ACTIVE, foreground="white",
-                               activeforeground="white", relief="flat", anchor="w",
-                               font=(self.font, 11), padx=14, pady=8, cursor="hand2")
-            button.grid(row=row, column=0, sticky="ew", padx=9, pady=2)
-            self.navigation[key] = button
+        self.make_sidebar()
 
         stage = tk.Frame(window, bg=BG)
         stage.grid(row=0, column=1, sticky="nsew")
@@ -299,6 +294,75 @@ class Studio:
             self.fields["native_account"].get() or self.fields["quality"].get() in ("ALAC", "ATMOS")
         ):
             self.start_timer = window.after(250, self.start_service)
+
+    def make_sidebar(self):
+        self.rail = tk.Frame(self.window, background=NAV, width=round(156 * self.scale))
+        self.rail.grid(row=0, column=0, sticky="ns")
+        self.rail.grid_propagate(False)
+        self.rail.columnconfigure(0, weight=1)
+
+        brand = tk.Frame(self.rail, background=NAV)
+        brand.grid(row=0, column=0, padx=15, pady=(21, 20), sticky="w")
+        self.brand_label = tk.Label(brand, background=NAV, borderwidth=0, padx=0, pady=0)
+        self.brand_label.pack(side="left")
+        tk.Label(brand, text=APP_TITLE, font=(self.font, 19, "bold"),
+                 background=NAV, foreground="white", padx=0, pady=0).pack(side="left", padx=(7, 0))
+
+        primary_pages = [(key, label) for key, label in PAGES.items() if key != "account"]
+        for row, (key, label) in enumerate(primary_pages, 1):
+            button = tk.Button(
+                self.rail, text=label, command=lambda page=key: self.show(page), background=NAV,
+                activebackground=NAV_ACTIVE, foreground="white", activeforeground="white",
+                relief="flat", anchor="w", font=(self.font, 11), padx=13, pady=8, cursor="hand2",
+            )
+            button.grid(row=row, column=0, sticky="ew", padx=9, pady=2)
+            self.navigation[key] = button
+
+        spacer = len(primary_pages) + 1
+        self.rail.rowconfigure(spacer, weight=1)
+        self.profile_button = tk.Button(
+            self.rail, textvariable=self.profile_text, command=lambda: self.show("account"),
+            background=NAV_ACCOUNT, activebackground=NAV_ACTIVE, foreground="white",
+            activeforeground="white", compound="left", anchor="w", borderwidth=0, relief="flat",
+            font=(self.font, 11, "bold"), padx=10, pady=9, cursor="hand2", takefocus=True,
+        )
+        self.profile_button.grid(row=spacer + 1, column=0, sticky="ew", padx=9, pady=(10, 13))
+        self.navigation["account"] = self.profile_button
+        self.sidebar_assets = {
+            prefix: {int(path.stem.rsplit("-", 1)[1]): path for path in (ROOT / "assets").glob(f"{prefix}-[0-9]*.png")
+                     if path.stem.rsplit("-", 1)[1].isdigit()}
+            for prefix in ("amdl", "account")
+        }
+        self.sidebar_size = None
+        self.refresh_sidebar_art()
+        self.window.bind("<Configure>", self.refresh_sidebar_art, add="+")
+
+    def refresh_sidebar_art(self, event=None):
+        if event is not None and event.widget is not self.window:
+            return
+        scale = self.scale
+        if os.name == "nt" and event is not None:
+            try:
+                user32 = ctypes.windll.user32
+                dpi = user32.GetDpiForWindow(ctypes.c_void_p(self.window.winfo_id()))
+                if dpi:
+                    scale = dpi / 96
+            except (AttributeError, OSError):
+                pass
+        sizes = []
+        for prefix, base in (("amdl", 36), ("account", 24)):
+            assets = self.sidebar_assets[prefix]
+            sizes.append(min(assets, key=lambda size: abs(size - base * scale)) if assets else None)
+        if sizes == self.sidebar_size:
+            return
+        self.sidebar_size = sizes
+        self.rail.configure(width=round(156 * scale))
+        self.brand_icon, self.profile_icon = (
+            tk.PhotoImage(master=self.window, file=self.sidebar_assets[prefix][size]) if size else None
+            for prefix, size in zip(("amdl", "account"), sizes)
+        )
+        self.brand_label.configure(image=self.brand_icon)
+        self.profile_button.configure(image=self.profile_icon)
 
     def configure_style(self):
         style = ttk.Style(self.window)
@@ -598,11 +662,17 @@ class Studio:
         self.active_page = page
         self.pages[page].tkraise()
         for key, button in self.navigation.items():
-            button.configure(background=NAV_ACTIVE if key == page else NAV)
+            normal = NAV_ACCOUNT if key == "account" else NAV
+            button.configure(background=NAV_ACTIVE if key == page else normal)
         if page == "music":
             self.music_browser.ensure_loaded()
         elif page == "library":
             self.library_browser.ensure_loaded()
+        elif page == "account" and not self.auth_busy:
+            if self.pending_region:
+                self.code_entry.focus_set()
+            elif not self.preferences.get("native_account") and not self.preferences.get("session"):
+                self.user_entry.focus_set()
 
     def catalog_region(self):
         region = self.fields["region"].get().strip().lower()
@@ -733,17 +803,30 @@ class Studio:
         self.path_summary.set(str(Path(base) / category) if base else "请选择保存目录")
 
     def refresh_account(self):
-        if self.preferences.get("native_account") and self.native_status and self.native_status.get("logged_in"):
+        remembered = self.preferences.get("native_account")
+        legacy = self.preferences.get("session")
+        signed_in = bool(remembered and self.native_status and self.native_status.get("logged_in"))
+        if signed_in:
             self.account_status.set("Apple Music 已登录")
-        elif self.preferences.get("native_account"):
+            caption = "已登录"
+        elif remembered and self.service_busy:
+            self.account_status.set("正在恢复 Apple Music 会话")
+            caption = "恢复中"
+        elif remembered and self.native_status is not None:
+            self.account_status.set("请重新登录 Apple Music")
+            caption = "重新登录"
+        elif remembered:
             self.account_status.set("有已记住的登录")
-        elif self.preferences.get("session"):
+            caption = "账户"
+        elif legacy:
             self.account_status.set("兼容会话已配置")
+            caption = "已连接"
         else:
             self.account_status.set("请登录 Apple Music")
-        self.logout_button.configure(state="normal" if not self.auth_busy and (
-            self.preferences.get("native_account") or self.preferences.get("session")
-        ) else "disabled")
+            caption = "登录"
+        self.profile_text.set("处理中" if self.auth_busy else caption)
+        self.profile_button.configure(foreground=NAV_SIGNED_IN if signed_in or legacy else "white")
+        self.logout_button.configure(state="normal" if not self.auth_busy and (remembered or legacy) else "disabled")
 
     def toggle_legacy(self):
         if self.legacy_card.winfo_manager():
@@ -1004,6 +1087,7 @@ class Studio:
         command = self.fields["wrapper"].get().strip()
         self.service_status.set("正在检查服务…")
         self.service_busy = True
+        self.refresh_account()
         self.service_stop.clear()
 
         def run():
@@ -1167,6 +1251,7 @@ class Studio:
                     return
             elif kind == "service_done":
                 self.service_busy = False
+                self.refresh_account()
                 if self.finish_close():
                     return
             elif kind in ("done", "failed"):
