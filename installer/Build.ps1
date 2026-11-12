@@ -1,11 +1,12 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.2.0',
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,
     [string]$AudioTools,
+    [string]$WrapperLiteArchive,
     [string]$InnoCompiler
 )
 
@@ -16,9 +17,9 @@ $workspace = Split-Path -Parent $studio
 if (-not $PythonLib) { $PythonLib = Join-Path $workspace 'playlist-download\python-deps' }
 if (-not $AudioTools) { $AudioTools = Join-Path $workspace 'wsl1\deps-win' }
 $distribution = Join-Path $PSScriptRoot 'dist'
-$portable = Join-Path $distribution 'AMDL-Studio'
+$portable = Join-Path $distribution 'amdl'
 $buildTools = Join-Path $PSScriptRoot '.tools'
-$setup = Join-Path $distribution 'AMDL-Studio-Setup.exe'
+$setup = Join-Path $distribution 'amdl-setup.exe'
 
 function Assert-LocalDirectory([string]$Path) {
     $item = Get-Item -LiteralPath $Path
@@ -67,7 +68,7 @@ function Get-InnoCompiler {
     return $compiler
 }
 
-$sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py')
+$sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
 foreach ($path in @($distribution, $buildTools)) {
     [void][IO.Directory]::CreateDirectory($path)
@@ -86,6 +87,18 @@ try {
     }
     $assets = Join-Path $studio 'assets'
     if (Test-Path -LiteralPath $assets -PathType Container) { Copy-SafeTree $assets (Join-Path $stage 'assets') }
+    if ($WrapperLiteArchive) {
+        $archive = Get-Item -LiteralPath $WrapperLiteArchive
+        $expected = 'B5E3C4CE7263F76AC9AE43F0DA9BFA9279AE5E1A0D660D13B6967E3E0158E9C8'
+        if ($archive.PSIsContainer -or $archive.Length -ne 158565274 -or
+            (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash -ne $expected) {
+            throw 'Wrapper Lite archive does not match the pinned official release.'
+        }
+        $wrapperBundle = Join-Path $stage 'wrapper-lite'
+        [void][IO.Directory]::CreateDirectory($wrapperBundle)
+        Copy-Item -LiteralPath $archive.FullName -Destination (
+            Join-Path $wrapperBundle 'wrapper-v3.0.4-windows-x86_64.zip')
+    }
 
     $runtime = Join-Path $stage 'runtime'
     [void][IO.Directory]::CreateDirectory($runtime)
@@ -154,30 +167,31 @@ try {
     }
 
     $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    $application = Join-Path $stage 'AMDLStudio.exe'
+    $application = Join-Path $stage 'amdl.exe'
     $launcher = Join-Path $PSScriptRoot 'Launcher.cs'
+    $manifest = Join-Path $PSScriptRoot 'Launcher.manifest'
     $compile = @('/nologo', '/codepage:65001', '/target:winexe', '/optimize+', '/reference:System.Windows.Forms.dll',
-        "/out:$application", $launcher)
+        "/out:$application", "/win32manifest:$manifest", $launcher)
     $icon = Join-Path $stage 'assets\AMDLStudio.ico'
     if (Test-Path -LiteralPath $icon -PathType Leaf) { $compile += "/win32icon:$icon" }
     & $compiler @compile
-    if ($LASTEXITCODE -ne 0) { throw 'The AMDL Studio launcher could not be compiled.' }
+    if ($LASTEXITCODE -ne 0) { throw 'The amdl launcher could not be compiled.' }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Portable.cmd') -Destination (Join-Path $stage 'Run.cmd')
 
     & $InnoCompiler /Qp "/DAppVersion=$Version" "/DPayloadDir=$stage" (Join-Path $PSScriptRoot 'Setup.iss')
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {
-        throw 'The AMDL Studio installer could not be compiled.'
+        throw 'The amdl installer could not be compiled.'
     }
     if (Test-Path -LiteralPath $portable) {
         $resolved = (Resolve-Path -LiteralPath $portable).Path
-        $expected = Join-Path ((Resolve-Path -LiteralPath $distribution).Path) 'AMDL-Studio'
+        $expected = Join-Path ((Resolve-Path -LiteralPath $distribution).Path) 'amdl'
         if ($resolved -ne $expected) { throw 'Portable directory is outside the build output.' }
         Assert-LocalDirectory $portable
         Remove-Item -LiteralPath $portable -Recurse -Force
     }
     Move-Item -LiteralPath $stage -Destination $portable
     Write-Output "Installer: $setup"
-    Write-Output "Portable:  $(Join-Path $portable 'AMDLStudio.exe')"
+    Write-Output "Portable:  $(Join-Path $portable 'amdl.exe')"
 }
 finally {
     if (Test-Path -LiteralPath $stage -PathType Container) {

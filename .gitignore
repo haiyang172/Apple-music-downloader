@@ -7,6 +7,7 @@ __pycache__/
 /dist/
 /build/
 /vendor/
+/wrapper-lite/
 /.tools/
 /installer/dist/
 /installer/.tools/
@@ -25,6 +26,9 @@ __pycache__/
 *.opus
 *.eac3
 *.key
+*.img
+*.qcow2
+*.vhdx
 .env*
 config.yaml
 settings.json

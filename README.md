@@ -1,11 +1,13 @@
-# AMDL Studio
+<img src="assets/AMDLStudio.png" alt="amdl" width="72" height="72">
 
-Windows 桌面下载和转码工具。下载页集中放置链接、音质、保存位置和进度。账户、转码与本地组件各有设置页。
+# amdl
+
+Windows 桌面下载和转码工具。界面、Wrapper Lite 登录服务、AMDL 下载引擎和 FFmpeg 由同一个程序管理。
 
 ## 使用
 
-1. 运行本地构建的 `AMDL-Studio-Setup.exe`，或双击便携目录里的 `AMDLStudio.exe`。
-2. 在「账户」选择「导入 apmyx」，或用「打开 Apple Music 登录」在浏览器登录，再把当前会话的 `media-user-token` 填入账户页。填写账号对应的两字母地区代码。Windows 为当前用户加密保存令牌。
+1. 运行本地构建的 `amdl-setup.exe`，或双击便携目录里的 `amdl.exe`。
+2. 在「账户」输入 Apple 账号和密码。Apple 要求双重认证时输入收到的验证码。登录成功后，Wrapper Lite 会在当前 Windows 用户目录中保存会话。amdl 默认在下次打开时恢复该会话。需要换账号时可先退出登录。
 3. 在「下载」选择保存目录，再粘贴 Apple Music 的歌曲、专辑或歌单链接，每行一个。保存目录可以是任意可写的本地或外接磁盘。若填写分类，文件直接放在该分类内。
 4. 选择 AAC-LC、ALAC 或 Dolby Atmos 作为下载音质。在「设置」选择保留原音轨，或用 FFmpeg 转换成 FLAC、MP3、AAC、WAV、Opus。MP3 提供 128、192、256 和 320 kbps。
 
@@ -13,9 +15,9 @@ Windows 桌面下载和转码工具。下载页集中放置链接、音质、保
 
 ## 组件
 
-安装包带有 Python/Tk、apmyx 下载后端、FFmpeg 及其所需的音频工具。AAC-LC 使用已有的 Apple Music 会话。ALAC 和 Atmos 需要可用的本地音频服务，并受账户和歌曲实际供应影响。
+安装包带有 Python/Tk、apmyx 下载后端、FFmpeg 及其所需的音频工具。登录服务使用 [Wrapper Lite](https://github.com/itouakirai/wrapper)，由 amdl 按需启动。服务只监听本机回环接口。首次启动会校验并解压随安装包提供的官方组件，源码运行时也可从固定的官方发行版获取。音质档位受账户和歌曲实际供应影响。
 
-如已注册 `u22-amdl`，应用会按需启动其服务，也可以在「组件」选择本机已有的服务程序。安装向导可选启用 Windows 的 WSL 1 功能。首次安装高音质服务仍需要准备 `u22-amdl` 环境或提供兼容的本地服务。 [Microsoft WSL 文档](https://learn.microsoft.com/en-us/windows/wsl/)
+旧版 apmyx 会话仍可在「账户 → 兼容会话设置」导入。兼容模式的 ALAC 和 Atmos 可以使用已有的 `u22-amdl` 或在「组件」指定兼容服务。安装向导中的 WSL 1 选项用于这一模式。 [Microsoft WSL 文档](https://learn.microsoft.com/en-us/windows/wsl/)
 
 ## 本地构建
 
@@ -32,6 +34,6 @@ python Studio.py
 .\installer\Build.ps1
 ```
 
-构建脚本会从本机依赖目录整理便携版，再编译安装包。可用 `Get-Help .\installer\Build.ps1 -Detailed` 或查看脚本顶部的参数，显式指定依赖目录。生成的文件放在 `installer\dist`。构建使用第三方组件的本地副本，源码仓库包含应用和构建脚本。第三方组件适用各自的许可。 [第三方组件](THIRD_PARTY.md)
+构建脚本会从本机依赖目录整理便携版，再编译安装包。使用 `-WrapperLiteArchive` 指定 [v3.0.4 Windows x64 ZIP](https://github.com/itouakirai/wrapper/releases/tag/v3.0.4) 可把已校验的登录组件放入安装包。生成的文件放在 `installer\dist`。第三方组件适用各自的许可。 [第三方组件](THIRD_PARTY.md)
 
 本项目的应用源码使用 [MIT 许可](LICENSE)。

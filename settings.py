@@ -10,8 +10,10 @@ import re
 import tempfile
 
 
-DATA = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "AMDL Studio" / "data"
+LOCAL = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local")
+DATA = LOCAL / "amdl" / "data"
 FILE = DATA / "settings.json"
+PREVIOUS_FILE = LOCAL / "AMDL Studio" / "data" / "settings.json"
 DEFAULTS = {
     "folder": "",
     "category": "",
@@ -21,6 +23,7 @@ DEFAULTS = {
     "region": "au",
     "wrapper": "",
     "auto_service": True,
+    "native_account": False,
 }
 
 
@@ -49,10 +52,11 @@ def _dpapi(data, decrypt=False):
 
 
 def load():
-    if not FILE.exists():
+    source = FILE if FILE.exists() else PREVIOUS_FILE
+    if not source.exists():
         return dict(DEFAULTS)
     try:
-        saved = json.loads(FILE.read_text(encoding="utf-8"))
+        saved = json.loads(source.read_text(encoding="utf-8"))
         if not isinstance(saved, dict):
             raise ValueError()
     except (OSError, ValueError):

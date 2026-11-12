@@ -21,8 +21,14 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 ERRORS = {
     "authentication_required": "请检查 Apple Music 的登录状态。ALAC 和杜比全景声还需要本地服务已登录。",
     "wrapper_unavailable": "无法连接本地音频服务，请检查服务状态。",
+    "incompatible_wrapper": "本地音频服务与下载组件版本不兼容，请运行 amdl 安装程序更新。",
+    "invalid_endpoint": "本地音频服务的地址或访问密钥无效，请重新启动 amdl。",
+    "invalid_storefront": "请在账户页面选择有效的 Apple Music 地区。",
+    "unsupported_storefront": "本地登录会话未提供所选地区，请改用账号所属的 Apple Music 地区。",
+    "unsupported_quality": "这首歌没有所选音质，请选择其他音质。",
+    "no_tracks": "Apple Music 未返回可下载的曲目，请检查链接和账户地区。",
     "network_error": "Apple Music 请求超时，请检查网络后重试。",
-    "missing_dependency": "下载组件不完整，请重新运行 AMDL 安装程序。",
+    "missing_dependency": "下载组件不完整，请重新运行 amdl 安装程序。",
     "tagging_failed": "无法写入歌曲标签。",
 }
 
@@ -61,6 +67,40 @@ def _safe_text(value, secrets):
     for secret in secrets:
         value = value.replace(secret, "[已隐藏]")
     return " ".join(value.split())[:240]
+
+
+def _settings_secrets(settings):
+    return tuple(
+        value for key, value in settings.items()
+        if ("token" in key or key.endswith("-api-key")) and isinstance(value, str) and value
+    )
+
+
+def _wrapper_settings(config):
+    wrapper = config.get("wrapper") or "legacy"
+    if wrapper == "legacy":
+        token = config.get("media-user-token", "")
+        if not isinstance(token, str) or not token.strip():
+            raise RuntimeError("请先在账户页面登录 Apple Music。")
+        return {"wrapper": wrapper, "media-user-token": token.strip(), "alac-max": 192}
+    if wrapper != "applemusicdecrypt":
+        raise ValueError("不支持所选的本地音频服务。")
+    endpoint = config.get("applemusicdecrypt-url")
+    match = (
+        re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/?", endpoint)
+        if isinstance(endpoint, str) else None
+    )
+    if not match or int(match[1]) > 65535:
+        raise ValueError("下载组件只能连接此电脑上的 amdl 登录服务。")
+    key = config.get("applemusicdecrypt-api-key")
+    if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,512}", key):
+        raise ValueError("本地音频服务的访问密钥无效，请重新启动 amdl。")
+    return {
+        "wrapper": wrapper,
+        "applemusicdecrypt-url": f"http://127.0.0.1:{int(match[1])}",
+        "applemusicdecrypt-api-key": key,
+        "alac-max": 192000,  # Wrapper Lite uses Hz; the legacy adapter uses kHz.
+    }
 
 
 def _apple_url(value):
@@ -137,7 +177,7 @@ class Engine:
             except yaml.YAMLError:
                 raise ValueError("invalid configuration") from None
         except (ImportError, OSError, UnicodeError, ValueError):
-            raise RuntimeError("无法读取 apmyx 登录配置，请在 AMDL 的账号页面填写登录令牌。") from None
+            raise RuntimeError("无法读取 apmyx 登录配置，请在 amdl 的账户页面登录。") from None
         if not isinstance(config, dict):
             return {}
         return {
@@ -163,7 +203,7 @@ class Engine:
         wsl = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/wsl.exe"
         if wsl.is_file():
             return [str(wsl), "-d", "u22-amdl", "--", "sh", "-lc", "cd && ./wrapper"], self.root
-        raise RuntimeError("找不到本地音频服务。请安装 AMDL 组件或在设置中选择服务程序。")
+        raise RuntimeError("找不到本地音频服务。请安装 amdl 组件或在设置中选择服务程序。")
 
     def prepare_service(self, command, stop, on_status) -> None:
         with self._service_lock:
@@ -201,40 +241,42 @@ class Engine:
                 _end_process(self._service)
                 self._service = None
 
-    def _child_environment(self):
+    def _child_environment(self, wrapper):
         env = dict(os.environ)
         tools = [self.backend_home / "tools", self.root / "wsl1/deps-win", self.root.parent / "wsl1/deps-win"]
         env["PATH"] = os.pathsep.join([*(str(path) for path in tools if path.is_dir()), env.get("PATH", "")])
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        if wrapper == "applemusicdecrypt":
+            bypass = ",".join(value for value in (env.get("no_proxy"), env.get("NO_PROXY"), "127.0.0.1") if value)
+            env.update(NO_PROXY=bypass, no_proxy=bypass)
         return env
 
     def _request(self, operation, settings, url, quality, work, stop, on_event):
         _check_cancelled(stop)
         work.mkdir()
         request_id = uuid4().hex
+        wrapper = settings["wrapper"]
         payload = json.dumps({
             "version": 1, "request_id": request_id, "operation": operation,
-            "wrapper": "legacy", "quality": quality, "settings": settings,
+            "wrapper": wrapper, "quality": quality, "settings": settings,
             "url": url, "work_dir": str(work),
         }, allow_nan=False)
-        secrets = tuple(
-            value for key, value in settings.items()
-            if "token" in key and isinstance(value, str) and value
-        )
+        secrets = _settings_secrets(settings)
         try:
             process = subprocess.Popen(
-                [str(self.backend_home / BRIDGE)], cwd=self.backend_home, env=self._child_environment(),
+                [str(self.backend_home / BRIDGE)], cwd=self.backend_home, env=self._child_environment(wrapper),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
             )
         except OSError:
-            raise RuntimeError("找不到或无法启动下载组件，请运行 AMDL 安装程序。") from None
+            raise RuntimeError("找不到或无法启动下载组件，请运行 amdl 安装程序。") from None
 
         queue = Queue()
         reader = threading.Thread(target=_read_events, args=(process, payload, queue), daemon=True)
         reader.start()
         metadata, complete, failure = None, None, None
         artifacts = []
+        track_errors = 0
         limit = time.monotonic() + (180 if operation == "probe" else 3 * 60 * 60)
         idle_limit = time.monotonic() + 240
         try:
@@ -273,10 +315,14 @@ class Engine:
                     code = event.get("code")
                     failure = ERRORS.get(code) if isinstance(code, str) else None
                 elif kind == "progress" and isinstance(data, dict):
+                    if wrapper == "applemusicdecrypt" and data.get("type") == "track_error":
+                        track_errors += 1
                     public = {key: _safe_text(data.get(key), secrets) for key in ("phase", "name", "track_id")}
-                    for key in ("percent", "phase_percent", "tracknum", "totaltracks"):
-                        if type(data.get(key)) in (int, float):
-                            public[key] = data[key]
+                    for key, alias in (("percent", "percent"), ("phase_percent", "phase_percent"),
+                                       ("tracknum", "track_num"), ("totaltracks", "total_tracks")):
+                        value = data.get(key, data.get(alias))
+                        if type(value) in (int, float):
+                            public[key] = value
                     on_event({"event": "progress", "data": public})
         finally:
             _end_process(process)
@@ -290,6 +336,7 @@ class Engine:
         counts = complete.get("result") or {}
         errors = sum(counts.get(key, 0) for key in ("Error", "Unavailable", "NotSong")
                      if isinstance(counts, dict) and type(counts.get(key)) is int and counts[key] > 0)
+        errors = max(errors, track_errors)
         if not success:
             errors = max(1, errors)
             on_event({"event": "warning", "message": failure or "有部分曲目未能下载。"})
@@ -298,7 +345,7 @@ class Engine:
     def _measure(self, path, stop):
         _check_cancelled(stop)
         if not self.ffmpeg.is_file():
-            raise RuntimeError("找不到 FFmpeg，请重新安装 AMDL 组件。")
+            raise RuntimeError("找不到 FFmpeg，请重新安装 amdl 组件。")
         try:
             process = subprocess.Popen(
                 [str(self.ffmpeg), "-hide_banner", "-nostdin", "-nostats", "-xerror", "-loglevel", "info",
@@ -331,7 +378,7 @@ class Engine:
             raise RuntimeError("无法验证下载音频的格式和时长。")
         return stream[1].casefold(), (stream[2] or "").casefold(), int(times[-1]) / 1_000_000
 
-    def _verified_artifacts(self, candidates, metadata, output, quality, stop, on_event):
+    def _verified_artifacts(self, candidates, metadata, output, quality, stop, on_event, secrets=()):
         tracks = {}
         for row in metadata.get("tracks", []):
             if not isinstance(row, dict) or not isinstance(row.get("trackData"), dict):
@@ -349,7 +396,7 @@ class Engine:
             _check_cancelled(stop)
             track_id = str(artifact.get("track_id") or "")
             attrs = tracks.get(track_id, {})
-            name = _safe_text(attrs.get("name"), ()) or "歌曲"
+            name = _safe_text(attrs.get("name"), secrets) or "歌曲"
             expected = attrs.get("durationInMillis", 0) / 1000
             try:
                 path = (output / str(artifact.get("path") or "")).resolve()
@@ -375,8 +422,8 @@ class Engine:
             found.append({
                 "path": str(path), "track_id": track_id, "duration": duration,
                 "expected_duration": expected, "codec": codec, "title": name,
-                "artist": _safe_text(attrs.get("artistName"), ()),
-                "album": _safe_text(attrs.get("albumName"), ()),
+                "artist": _safe_text(attrs.get("artistName"), secrets),
+                "album": _safe_text(attrs.get("albumName"), secrets),
             })
         return found, errors
 
@@ -389,31 +436,39 @@ class Engine:
         if quality not in CODECS:
             raise ValueError("请选择 AAC-LC、ALAC 或杜比全景声。")
         url = _apple_url(url)
+        wrapper = _wrapper_settings(config)
+        lite = wrapper["wrapper"] == "applemusicdecrypt"
+        storefront = (config.get("applemusicdecrypt-storefront") if lite else None) or config.get("storefront")
+        if lite and not storefront:
+            url_region = urlsplit(url).path.strip("/").split("/", 1)[0]
+            if re.fullmatch(r"[a-z]{2}", url_region):
+                storefront = url_region
+        storefront = storefront or "us"
+        if not isinstance(storefront, str) or not re.fullmatch(r"[a-z]{2}", storefront.strip().lower()):
+            raise ValueError("Apple Music 地区应使用两位字母代码，例如 cn 或 au。")
+        storefront = storefront.strip().lower()
         stage = Path(stage).resolve(strict=True)
         output = stage / "files"
         output.mkdir()
-        token = config.get("media-user-token", "")
-        if not isinstance(token, str) or not token.strip():
-            raise RuntimeError("请先在账号页面配置 Apple Music 登录令牌。")
-        storefront = str(config.get("storefront") or "us").lower()
-        if not re.fullmatch(r"[a-z]{2}", storefront):
-            raise ValueError("Apple Music 地区应使用两位字母代码，例如 cn 或 au。")
         settings = {
-            "media-user-token": token.strip(), "storefront": storefront,
+            **wrapper, "storefront": storefront,
             "language": str(config.get("language") or "en-US"),
             "get-m3u8-from-device": False, "aac-type": "aac-lc",
             "decrypt-m3u8-port": "127.0.0.1:10020", "get-m3u8-port": "127.0.0.1:20020",
-            "alac-max": 192, "atmos-max": 2768, "alac-fix": True,
+            "atmos-max": 2768, "alac-fix": True,
             "aac-save-folder": str(output), "alac-save-folder": str(output),
             "atmos-save-folder": str(output), "mv-save-folder": str(output),
             "artist-folder-format": "", "album-folder-format": "", "playlist-folder-format": "",
             "song-file-format": "{SongId} {SongName}", "playlist-song-file-format": "{SongId} {SongName}",
             "save-cover-file": False, "save-artist-cover": False, "save-lrc-file": False,
         }
+        if lite:
+            settings["applemusicdecrypt-storefront"] = storefront
         on_event({"event": "progress", "data": {"phase": "正在读取曲目信息"}})
         metadata, _, _ = self._request("probe", settings, url, quality, stage / "probe", stop, on_event)
-        settings["get-m3u8-from-device"] = quality != "AAC"
+        settings["get-m3u8-from-device"] = not lite and quality != "AAC"
         _, candidates, errors = self._request("download", settings, url, quality, stage / "work", stop, on_event)
         on_event({"event": "progress", "data": {"phase": "正在验证歌曲"}})
-        artifacts, rejected = self._verified_artifacts(candidates, metadata, output, quality, stop, on_event)
+        artifacts, rejected = self._verified_artifacts(candidates, metadata, output, quality, stop, on_event,
+                                                       _settings_secrets(settings))
         return {"artifacts": artifacts, "errors": errors + rejected}

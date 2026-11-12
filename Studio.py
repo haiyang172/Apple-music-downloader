@@ -1,5 +1,6 @@
-"""AMDL Studio desktop application."""
+"""amdl desktop application."""
 
+import ctypes
 import os
 from pathlib import Path
 import queue
@@ -10,17 +11,17 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, ttk
 from urllib.parse import parse_qs, urlsplit
-import webbrowser
 
 
 ROOT = Path(__file__).resolve().parent
-APP_TITLE = "AMDL Studio"
+APP_TITLE = "amdl"
 for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib"):
     if library.is_dir():
         sys.path.insert(0, str(library))
 
 import audio
 from engine import Cancelled, Engine
+from login_service import LoginService
 import settings
 from storage import destination_for, publish, volume_identity
 
@@ -47,7 +48,19 @@ def find_backend():
     for folder in backend_locations():
         if (folder / bridge).is_file() and (folder / "tools/ffmpeg.exe").is_file():
             return folder
-    raise RuntimeError("找不到下载引擎或 FFmpeg。请运行 AMDL Studio 安装包。")
+    raise RuntimeError("找不到下载引擎或 FFmpeg。请运行 amdl 安装包。")
+
+
+def configure_windows():
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        set_app_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        set_app_id.argtypes = (ctypes.c_wchar_p,)
+        set_app_id("amdl.desktop")
+    except (AttributeError, OSError):
+        pass
 
 
 def read_links(text):
@@ -81,16 +94,26 @@ def read_links(text):
     return list(dict.fromkeys(result))
 
 
-def run_download(job, stop, post, engine=None):
+def run_download(job, stop, post, engine=None, login_service=None):
     paths = destination_for(job["folder"], job["category"])
     disk = volume_identity(Path(job["folder"]))
     engine = engine or Engine(ROOT, find_backend())
-    config = {"media-user-token": settings.session(job), "storefront": job["region"]}
-    if not config["media-user-token"]:
-        raise ValueError("请先在「账户」里导入或保存 Apple Music 会话。")
     quality = job["quality"]
-    if quality in ("ALAC", "ATMOS"):
-        engine.prepare_service(job["wrapper"], stop, lambda status: post("status", status))
+    if job.get("native_account"):
+        login_service = login_service or LoginService(ROOT, settings.DATA)
+        login_service.start(stop, lambda status: post("status", status))
+        if not login_service.status()["logged_in"]:
+            raise ValueError("Apple Music 登录已过期。请在「账户」重新登录。")
+        config = login_service.engine_config()
+        region = config.get("applemusicdecrypt-storefront") or job["region"]
+        config["storefront"] = region
+        config["applemusicdecrypt-storefront"] = region
+    else:
+        config = {"media-user-token": settings.session(job), "storefront": job["region"]}
+        if not config["media-user-token"]:
+            raise ValueError("请先在「账户」登录 Apple Music。")
+        if quality in ("ALAC", "ATMOS"):
+            engine.prepare_service(job["wrapper"], stop, lambda status: post("status", status))
 
     saved = existing = errors = 0
     for index, url in enumerate(job["links"], 1):
@@ -108,7 +131,7 @@ def run_download(job, stop, post, engine=None):
             elif event.get("event") == "warning":
                 post("log", str(event.get("message", "")))
 
-        with tempfile.TemporaryDirectory(prefix="AMDL-Studio-") as working:
+        with tempfile.TemporaryDirectory(prefix="amdl-") as working:
             stage = Path(working)
             try:
                 result = engine.download(config, url, quality, stage, stop, on_event)
@@ -144,11 +167,15 @@ class Studio:
         self.window = window
         self.stop = threading.Event()
         self.service_stop = threading.Event()
+        self.auth_stop = threading.Event()
         self.messages = queue.SimpleQueue()
         self.engine = None
+        self.login_service = LoginService(ROOT, settings.DATA)
         self.busy = False
         self.closing = False
         self.service_busy = False
+        self.auth_busy = False
+        self.pending_region = None
         try:
             self.preferences = settings.load()
             load_error = ""
@@ -172,12 +199,23 @@ class Studio:
         self.engine_status = tk.StringVar(window)
         self.service_status = tk.StringVar(window, "按下载音质启动")
         self.token = tk.StringVar(window)
+        self.username = tk.StringVar(window)
+        self.password = tk.StringVar(window)
+        self.auth_code = tk.StringVar(window)
+        self.auth_status = tk.StringVar(window)
+        self.native_status = None
         self.pages = {}
         self.navigation = {}
 
         window.title(APP_TITLE)
-        window.geometry("940x650")
-        window.minsize(790, 600)
+        self.scale = max(1, window.winfo_fpixels("1i") / 96)
+        width = min(round(960 * self.scale), window.winfo_screenwidth() - 42)
+        height = min(round(670 * self.scale), window.winfo_screenheight() - 100)
+        window.geometry(f"{width}x{height}")
+        window.minsize(min(round(790 * self.scale), width), min(round(590 * self.scale), height))
+        icon = ROOT / "assets" / "AMDLStudio.ico"
+        if icon.is_file():
+            window.iconbitmap(str(icon))
         window.configure(bg=BG)
         window.protocol("WM_DELETE_WINDOW", self.close)
         window.rowconfigure(0, weight=1)
@@ -187,13 +225,16 @@ class Studio:
         self.font = "Inter" if "Inter" in installed_fonts else "Segoe UI"
         self.configure_style()
 
-        rail = tk.Frame(window, background=NAV, width=155)
+        rail = tk.Frame(window, background=NAV, width=round(148 * self.scale))
         rail.grid(row=0, column=0, sticky="ns")
         rail.grid_propagate(False)
         rail.columnconfigure(0, weight=1)
         rail.rowconfigure(7, weight=1)
-        tk.Label(rail, text="AMDL Studio", font=(self.font, 15, "bold"),
-                 background=NAV, foreground="white").grid(row=0, column=0, padx=14, pady=(24, 23), sticky="w")
+        mark = ROOT / "assets" / "amdl-32.png"
+        self.brand_icon = tk.PhotoImage(file=mark) if mark.is_file() else None
+        tk.Label(rail, text=APP_TITLE, image=self.brand_icon, compound="left", padx=4,
+                 font=(self.font, 19, "bold"), background=NAV, foreground="white").grid(
+            row=0, column=0, padx=13, pady=(24, 23), sticky="w")
         for row, (key, label) in enumerate(PAGES.items(), 1):
             button = tk.Button(rail, text=label, command=lambda page=key: self.show(page),
                                background=NAV, activebackground=NAV_ACTIVE, foreground="white",
@@ -221,11 +262,18 @@ class Studio:
         for key in ("folder", "category"):
             self.fields[key].trace_add("write", self.update_path)
         self.update_path()
-        self.show("download")
-        self.links.focus_set()
-        window.after(80, self.pump)
-        if self.fields["auto_service"].get() and self.fields["quality"].get() in ("ALAC", "ATMOS"):
-            window.after(250, self.start_service)
+        if self.preferences.get("native_account") or self.preferences.get("session"):
+            self.show("download")
+            self.links.focus_set()
+        else:
+            self.show("account")
+            self.user_entry.focus_set()
+        self.pump_timer = window.after(80, self.pump)
+        self.start_timer = None
+        if self.fields["auto_service"].get() and (
+            self.fields["native_account"].get() or self.fields["quality"].get() in ("ALAC", "ATMOS")
+        ):
+            self.start_timer = window.after(250, self.start_service)
 
     def configure_style(self):
         style = ttk.Style(self.window)
@@ -311,23 +359,47 @@ class Studio:
 
     def make_account(self):
         page = self.pages["account"]
-        self.header(page, "Apple Music 账户", "可导入本机 apmyx 的会话，或在 Apple Music 登录后添加会话令牌。")
+        self.header(page, "Apple Music 账户", "登录成功后会记住会话，下次打开 amdl 会自动恢复。")
         card = self.card(page, 2)
         card.columnconfigure(1, weight=1)
-        self.label(card, variable=self.account_status).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.label(card, "账号地区").grid(row=1, column=0, sticky="w", pady=(10, 4))
-        ttk.Entry(card, textvariable=self.fields["region"], width=7).grid(row=1, column=1, sticky="w", padx=12)
-        self.label(card, "会话令牌").grid(row=2, column=0, sticky="w")
-        ttk.Entry(card, textvariable=self.token, show="•").grid(row=2, column=1, sticky="ew", padx=(12, 0))
-        self.label(card, "令牌由 Windows 为当前用户加密保存。", muted=True).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(6, 7))
+        self.label(card, variable=self.account_status).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.label(card, "Apple 账号").grid(row=1, column=0, sticky="w")
+        self.user_entry = ttk.Entry(card, textvariable=self.username)
+        self.user_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0))
+        self.label(card, "密码").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.password_entry = ttk.Entry(card, textvariable=self.password, show="•")
+        self.password_entry.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=(8, 0))
+        self.label(card, "账号地区").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(card, textvariable=self.fields["region"], width=7).grid(
+            row=3, column=1, sticky="w", padx=12, pady=(8, 0))
+        self.code_label = self.label(card, "验证码")
+        self.code_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.code_entry = ttk.Entry(card, textvariable=self.auth_code, width=12)
+        self.code_entry.grid(row=4, column=1, sticky="w", padx=12, pady=(8, 0))
+        self.code_label.grid_remove()
+        self.code_entry.grid_remove()
         actions = tk.Frame(card, bg=PANEL)
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew")
-        self.action(actions, "保存会话", self.save_account, primary=True).pack(side="left")
-        self.action(actions, "导入 apmyx", self.import_account).pack(side="left", padx=7)
-        self.action(actions, "打开 Apple Music 登录",
-                    lambda: webbrowser.open("https://music.apple.com/")).pack(side="left")
-        self.action(actions, "清除会话", self.clear_account).pack(side="right")
+        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.login_button = self.action(actions, "登录", self.login_account, primary=True)
+        self.login_button.pack(side="left")
+        self.cancel_auth_button = self.action(actions, "取消验证", self.reset_login)
+        self.logout_button = self.action(actions, "退出登录", self.logout_account)
+        self.logout_button.pack(side="right")
+        self.label(card, variable=self.auth_status, muted=True).grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(7, 0))
+
+        self.legacy_card = self.card(page, 3)
+        self.legacy_card.columnconfigure(1, weight=1)
+        self.label(self.legacy_card, "会话令牌").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.legacy_card, textvariable=self.token, show="•").grid(
+            row=0, column=1, sticky="ew", padx=(12, 0))
+        legacy_actions = tk.Frame(self.legacy_card, bg=PANEL)
+        legacy_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.action(legacy_actions, "保存会话", self.save_account).pack(side="left")
+        self.action(legacy_actions, "导入 apmyx", self.import_account).pack(side="left", padx=7)
+        self.legacy_card.grid_remove()
+        self.legacy_toggle = self.action(page, "兼容会话设置", self.toggle_legacy)
+        self.legacy_toggle.grid(row=4, column=0, sticky="w")
 
     def make_settings(self):
         page = self.pages["settings"]
@@ -353,17 +425,17 @@ class Studio:
 
     def make_components(self):
         page = self.pages["components"]
-        self.header(page, "下载组件", "在这里检查下载引擎、FFmpeg 和无损／全景声服务。")
+        self.header(page, "下载组件", "查看登录服务、下载引擎和 FFmpeg 的状态。")
         card = self.card(page, 2)
         card.columnconfigure(1, weight=1)
         self.label(card, variable=self.engine_status, wrap=545).grid(row=0, column=0, columnspan=2, sticky="w")
         self.action(card, "重新检查", self.refresh_engine).grid(row=0, column=2, sticky="e")
-        self.label(card, "服务程序").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.label(card, "兼容服务").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(card, textvariable=self.fields["wrapper"]).grid(row=1, column=1, sticky="ew", padx=10, pady=(10, 0))
         self.action(card, "浏览", self.browse_wrapper).grid(row=1, column=2, pady=(10, 0))
-        self.label(card, "留空时使用本机已有的 Ubuntu-AMDL。", muted=True).grid(
+        self.label(card, "用于旧会话模式。留空时查找本机已有的 Ubuntu-AMDL。", muted=True).grid(
             row=2, column=1, columnspan=2, sticky="w", padx=10, pady=(4, 5))
-        ttk.Checkbutton(card, text="打开程序时启动所选音质需要的服务",
+        ttk.Checkbutton(card, text="打开 amdl 时恢复登录服务",
                         variable=self.fields["auto_service"]).grid(row=3, column=0, columnspan=3, sticky="w")
         self.label(card, variable=self.service_status, muted=True).grid(
             row=4, column=0, columnspan=3, sticky="w", pady=(7, 6))
@@ -383,7 +455,23 @@ class Studio:
         self.path_summary.set(str(Path(base) / category) if base else "请选择保存目录")
 
     def refresh_account(self):
-        self.account_status.set("会话已配置" if self.preferences.get("session") else "请配置 Apple Music 会话")
+        if self.preferences.get("native_account") and self.native_status and self.native_status.get("logged_in"):
+            self.account_status.set("Apple Music 已登录")
+        elif self.preferences.get("native_account"):
+            self.account_status.set("有已记住的登录")
+        elif self.preferences.get("session"):
+            self.account_status.set("兼容会话已配置")
+        else:
+            self.account_status.set("请登录 Apple Music")
+        self.logout_button.configure(state="normal" if not self.auth_busy and (
+            self.preferences.get("native_account") or self.preferences.get("session")
+        ) else "disabled")
+
+    def toggle_legacy(self):
+        if self.legacy_card.winfo_manager():
+            self.legacy_card.grid_remove()
+        else:
+            self.legacy_card.grid()
 
     def refresh_engine(self):
         try:
@@ -421,6 +509,8 @@ class Studio:
         self.preferences = values
         self.fields["quality"].set(values["quality"])
         self.fields["output"].set(values["output"])
+        self.fields["region"].set(values["region"])
+        self.fields["native_account"].set(values["native_account"])
         self.refresh_account()
 
     def error(self, title, problem):
@@ -459,7 +549,122 @@ class Studio:
             self.fields["wrapper"].set(chosen)
             self.save_preferences()
 
+    def set_auth_busy(self, active):
+        self.auth_busy = active
+        state = "disabled" if active else "normal"
+        for widget in (self.user_entry, self.password_entry, self.code_entry, self.login_button,
+                       self.cancel_auth_button, self.legacy_toggle):
+            widget.configure(state=state)
+        self.refresh_account()
+
+    def reset_login(self):
+        self.pending_region = None
+        self.password.set("")
+        self.auth_code.set("")
+        self.code_label.grid_remove()
+        self.code_entry.grid_remove()
+        self.cancel_auth_button.pack_forget()
+        self.login_button.configure(text="登录")
+
+    def login_account(self):
+        if self.auth_busy or self.busy:
+            return
+        region = self.fields["region"].get().strip().lower()
+        if not re.fullmatch(r"[a-z]{2}", region):
+            self.error("无法登录", "请输入两位字母的账号地区，例如 au、cn 或 us。")
+            return
+        code = None
+        if self.pending_region:
+            username = password = ""
+            region = self.pending_region
+            code = self.auth_code.get().strip()
+            if not re.fullmatch(r"[0-9]{6}", code):
+                self.error("无法登录", "请输入收到的 6 位验证码。")
+                return
+        else:
+            username, password = self.username.get().strip(), self.password.get()
+            if not username or not password:
+                self.error("无法登录", "请输入 Apple 账号和密码。")
+                return
+        self.password.set("")
+        self.auth_code.set("")
+        self.auth_stop.clear()
+        self.set_auth_busy(True)
+        self.auth_status.set("正在连接本地登录服务…")
+
+        def run():
+            try:
+                self.login_service.start(self.auth_stop, lambda value: self.post("auth_status", value))
+                if self.auth_stop.is_set():
+                    return
+                self.post("auth_status", "正在等待 Apple 登录结果…")
+                result = self.login_service.login(username, password, code=code)
+                if result.get("logged_in"):
+                    state = self.login_service.status()
+                    regions = state.get("regions") or []
+                    if regions and region not in regions:
+                        region_to_save = regions[0]
+                    else:
+                        region_to_save = region
+                else:
+                    region_to_save = region
+                self.post("login_result", (result, region_to_save))
+            except (OSError, RuntimeError, ValueError) as error:
+                self.post("auth_status", str(error))
+            finally:
+                self.post("auth_done", None)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def finish_login(self, result, region):
+        if result.get("needs_code"):
+            self.pending_region = region
+            self.code_label.grid()
+            self.code_entry.grid()
+            self.cancel_auth_button.pack(side="left", padx=7)
+            self.login_button.configure(text="验证并登录")
+            self.auth_status.set("Apple 要求双重认证，请输入设备或短信收到的验证码。")
+            return
+        self.reset_login()
+        if not result.get("logged_in"):
+            self.auth_status.set("Apple Music 登录未完成。请检查账号或验证码。")
+            return
+        try:
+            values = {**self.preferences, "native_account": True, "region": region}
+            self.store(values)
+            self.native_status = result
+            self.refresh_account()
+            self.username.set("")
+            self.auth_status.set("登录成功。此会话将在下次启动时恢复。")
+        except (OSError, ValueError) as error:
+            self.auth_status.set(str(error))
+
+    def logout_account(self):
+        if self.auth_busy or self.busy:
+            return
+        if not self.preferences.get("native_account"):
+            self.clear_account()
+            return
+        self.auth_stop.clear()
+        self.set_auth_busy(True)
+        self.auth_status.set("正在退出登录…")
+
+        def run():
+            try:
+                self.login_service.start(self.auth_stop, lambda value: self.post("auth_status", value))
+                if not self.auth_stop.is_set():
+                    self.login_service.logout()
+                    self.post("logout_result", None)
+            except (OSError, RuntimeError, ValueError) as error:
+                self.post("auth_status", str(error))
+            finally:
+                self.post("auth_done", None)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def save_account(self, imported=None):
+        if self.auth_busy or self.busy:
+            return
         try:
             values = self.snapshot()
             token = imported if imported is not None else self.token.get()
@@ -467,12 +672,17 @@ class Studio:
                 values["session"] = settings.protect_session(token)
             elif not values.get("session"):
                 raise ValueError("请输入会话令牌，或从 apmyx 导入。")
+            values["native_account"] = False
+            self.fields["native_account"].set(False)
             self.store(values)
             self.token.set("")
+            self.auth_status.set("已切换到兼容会话。")
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法保存账户", error)
 
     def import_account(self):
+        if self.auth_busy or self.busy:
+            return
         try:
             for folder in backend_locations()[1:]:
                 if not (folder / "config.yaml").is_file():
@@ -489,10 +699,15 @@ class Studio:
 
     def clear_account(self):
         try:
-            values = self.snapshot()
+            values = dict(self.preferences)
             values.pop("session", None)
+            values["native_account"] = False
+            self.fields["native_account"].set(False)
+            self.native_status = None
             self.store(values)
             self.token.set("")
+            self.reset_login()
+            self.auth_status.set("已退出登录。")
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法清除会话", error)
 
@@ -500,13 +715,16 @@ class Studio:
         self.messages.put((kind, value))
 
     def start_service(self):
-        if self.service_busy:
+        if self.service_busy or self.closing:
             return
-        try:
-            engine = self.get_engine()
-        except (OSError, RuntimeError) as error:
-            self.service_status.set(str(error))
-            return
+        legacy = not self.preferences.get("native_account") and self.preferences.get("session")
+        engine = None
+        if legacy:
+            try:
+                engine = self.get_engine()
+            except (OSError, RuntimeError) as error:
+                self.service_status.set(str(error))
+                return
         command = self.fields["wrapper"].get().strip()
         self.service_status.set("正在检查服务…")
         self.service_busy = True
@@ -514,7 +732,14 @@ class Studio:
 
         def run():
             try:
-                engine.prepare_service(command, self.service_stop, lambda value: self.post("service", value))
+                report = lambda value: self.post("service", value)
+                if engine is None:
+                    self.login_service.start(self.service_stop, report)
+                    status = self.login_service.status()
+                    self.post("native_status", status)
+                    report("登录服务已就绪" if status["logged_in"] else "登录服务已启动，请登录 Apple Music。")
+                else:
+                    engine.prepare_service(command, self.service_stop, report)
             except (OSError, RuntimeError, ValueError) as error:
                 self.post("service", str(error))
             finally:
@@ -528,15 +753,18 @@ class Studio:
         return self.engine
 
     def start_download(self):
+        if self.auth_busy:
+            self.status.set("请先完成 Apple Music 登录。")
+            return
         try:
             job = self.snapshot()
             if not job["folder"]:
                 raise ValueError("请先选择保存目录。")
             destination_for(job["folder"], job["category"])
             job["links"] = read_links(self.links.get("1.0", "end"))
-            if not job.get("session"):
+            if not job.get("native_account") and not job.get("session"):
                 self.show("account")
-                raise ValueError("请先配置 Apple Music 会话。")
+                raise ValueError("请先登录 Apple Music。")
             engine = self.get_engine()
             self.store(job)
         except (OSError, RuntimeError, ValueError) as error:
@@ -549,7 +777,7 @@ class Studio:
 
     def worker(self, job, engine):
         try:
-            self.post("done", run_download(job, self.stop, self.post, engine))
+            self.post("done", run_download(job, self.stop, self.post, engine, self.login_service))
         except Cancelled:
             self.post("done", (0, 0, 0))
         except (OSError, RuntimeError, ValueError) as error:
@@ -577,18 +805,27 @@ class Studio:
     def close(self):
         self.closing = True
         self.service_stop.set()
+        self.auth_stop.set()
+        self.pending_region = None
         if self.busy:
             self.cancel()
         self.finish_close()
 
     def finish_close(self):
-        if not self.closing or self.busy or self.service_busy:
+        if not self.closing or self.busy or self.service_busy or self.auth_busy:
             return False
         try:
             if self.engine is not None:
                 self.engine.close_service()
         except (OSError, RuntimeError):
             pass
+        try:
+            self.login_service.close()
+        except (OSError, RuntimeError):
+            pass
+        for timer in (self.start_timer, self.pump_timer):
+            if timer:
+                self.window.after_cancel(timer)
         self.window.destroy()
         return True
 
@@ -610,6 +847,21 @@ class Studio:
                 self.log_message(value)
             elif kind == "service":
                 self.service_status.set(value)
+            elif kind == "native_status":
+                self.native_status = value
+                self.refresh_account()
+            elif kind == "auth_status":
+                self.auth_status.set(value)
+            elif kind == "login_result" and not self.closing:
+                self.finish_login(*value)
+            elif kind == "logout_result":
+                self.clear_account()
+            elif kind == "auth_done":
+                self.set_auth_busy(False)
+                if self.pending_region:
+                    self.code_entry.focus_set()
+                if self.finish_close():
+                    return
             elif kind == "service_done":
                 self.service_busy = False
                 if self.finish_close():
@@ -624,10 +876,11 @@ class Studio:
                     value = f"{state} · 新增 {saved} · 已存在 {existing} · 失败 {errors}"
                 self.status.set(value)
                 self.log_message(value)
-        self.window.after(80, self.pump)
+        self.pump_timer = self.window.after(80, self.pump)
 
 
 if __name__ == "__main__":
+    configure_windows()
     window = tk.Tk()
     Studio(window)
     window.mainloop()
