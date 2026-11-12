@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.3.1',
+    [string]$Version = '0.3.2',
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,
@@ -118,7 +118,7 @@ function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
 }
 
 $sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py',
-    'music_catalog.py', 'music_library.py', 'music_browser.py')
+    'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
 foreach ($path in @($distribution, $buildTools)) {
     [void][IO.Directory]::CreateDirectory($path)

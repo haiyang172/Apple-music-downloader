@@ -3,6 +3,7 @@
 from collections import OrderedDict
 import base64
 from pathlib import Path
+import re
 import struct
 import subprocess
 import threading
@@ -99,6 +100,54 @@ def prepare_preview(url, ffmpeg, directory):
     return output
 
 
+def _sort_value(value):
+    if isinstance(value, (int, float)):
+        return value
+    return tuple(int(part) if index % 2 else part for index, part in
+                 enumerate(re.split(r"([0-9]+)", str(value).strip().casefold())))
+
+
+class TreeSort:
+    """Click a list heading to sort loaded rows and click again to reverse."""
+
+    def __init__(self, tree, headings, value):
+        self.tree = tree
+        self.headings = dict(headings)
+        self.value = value
+        self.column = None
+        self.descending = False
+        self.show_headings()
+
+    def show_headings(self):
+        for column, label in self.headings.items():
+            suffix = ("  ▼" if self.descending else "  ▲") if column == self.column else ""
+            self.tree.heading(column, text=label + suffix, command=lambda key=column: self.choose(key))
+
+    def set_heading(self, column, label):
+        self.headings[column] = label
+        self.show_headings()
+
+    def choose(self, column):
+        self.descending = self.column == column and not self.descending
+        self.column = column
+        self.show_headings()
+        self.apply()
+
+    def apply(self):
+        if self.column is None:
+            return
+        present, empty = [], []
+        for row in self.tree.get_children():
+            value = self.value(row, self.column)
+            if value is None or value == 0 or (isinstance(value, str) and value.strip() in ("", "—")):
+                empty.append(row)
+            else:
+                present.append((row, _sort_value(value)))
+        present.sort(key=lambda item: item[1], reverse=self.descending)
+        for index, row in enumerate([*(item[0] for item in present), *empty]):
+            self.tree.move(row, "", index)
+
+
 class MusicBrowser:
     def __init__(self, app, page, *, private=False):
         self.app = app
@@ -157,7 +206,7 @@ class MusicBrowser:
         self.caption = tk.StringVar(page, "资料库" if private else "热门歌曲")
         app.label(page, variable=self.caption, background=app.background, muted=True).grid(
             row=2, column=0, sticky="w", pady=(0, 5))
-        result = ttk.Frame(page, style="Surface.TFrame")
+        result = app.panel(page, padding=(8, 6))
         result.grid(row=3, column=0, sticky="nsew")
         result.columnconfigure(0, weight=1)
         result.rowconfigure(0, weight=1)
@@ -168,6 +217,8 @@ class MusicBrowser:
         self.tree.heading("artist", text="艺人", anchor="w")
         self.tree.heading("album", text="专辑", anchor="w")
         self.tree.heading("duration", text="时长")
+        self.sort = TreeSort(self.tree, {"#0": "名称", "artist": "艺人", "album": "专辑", "duration": "时长"},
+                             lambda row, column: self.rows[row].get("title" if column == "#0" else column))
         self.tree.column("#0", width=260, minwidth=155, stretch=True)
         self.tree.column("artist", width=140, minwidth=85)
         self.tree.column("album", width=152, minwidth=90)
@@ -265,7 +316,7 @@ class MusicBrowser:
             self.back_button.grid_remove()
         show_song_details = bool(collection) or self.kind == "song"
         self.tree.configure(displaycolumns=("artist", "album", "duration") if show_song_details else ("artist",))
-        self.tree.heading("artist", text="创建者" if not show_song_details and self.kind == "playlist" else "艺人")
+        self.sort.set_heading("artist", "创建者" if not show_song_details and self.kind == "playlist" else "艺人")
         token = ""
         if self.private:
             try:
@@ -274,7 +325,7 @@ class MusicBrowser:
                 self.receive(serial, None, None, str(error))
                 return
             if not token:
-                self.receive(serial, None, None, "连接 Apple Music 资料库后即可查看。")
+                self.receive(serial, None, None, "个人资料库需要 Apple Music 网页授权。")
                 return
         storefront = self.app.catalog_region()
         term = self.term
@@ -314,6 +365,7 @@ class MusicBrowser:
             text, values = self.cells(item)
             item_id = self.tree.insert("", "end", text=text, values=values)
             self.rows[item_id] = item
+        self.sort.apply()
         self.status.set(f"{len(self.rows)} 项" if self.rows else "没有结果")
         if cursor:
             self.more.pack(side="right")

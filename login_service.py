@@ -294,6 +294,7 @@ class LoginService:
             if code is None:
                 if not username or not password or len(username) > 320 or len(password) > 1024:
                     raise ValueError("请输入 Apple 账户和密码。")
+                self.login_id = None
                 result = self._api("POST", "/api/accounts/login", {
                     "username": username, "password": password,
                 }, timeout=95)
@@ -311,7 +312,6 @@ class LoginService:
             identifier = data.get("loginId")
             if not isinstance(identifier, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", identifier):
                 raise RuntimeError("本地登录服务没有返回有效会话。")
-            self.login_id = identifier
             state = str(data.get("state", "")).lower()
             if state == "running":
                 deadline = time.monotonic() + 20
@@ -320,11 +320,23 @@ class LoginService:
                     poll = self._api("GET", f"/api/logins/{identifier}")
                     state = str((poll.get("data") or {}).get("state", "")).lower()
             if state == "need2fa":
+                self.login_id = identifier
                 return {"logged_in": False, "needs_code": True}
             self.login_id = None
             if state == "success":
                 return {"logged_in": True, "needs_code": False}
             raise RuntimeError("Apple 登录未完成，请检查账户、密码或验证码。")
+
+    def cancel_login(self):
+        """Forget the pending OTP challenge and cancel it if the service is reachable."""
+        with self.lock:
+            identifier, self.login_id = self.login_id, None
+            if identifier is None:
+                return False
+            try:
+                return self._api("DELETE", f"/api/logins/{identifier}")["code"] == 0
+            except RuntimeError:
+                return False
 
     def logout(self):
         with self.lock:

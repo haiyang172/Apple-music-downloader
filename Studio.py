@@ -22,10 +22,12 @@ for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib")
         sys.path.insert(0, str(library))
 
 import audio
+from account_ui import VerificationDialog, build_account_page
 from engine import Cancelled, Engine
 from login_service import LoginService
-from music_browser import MusicBrowser, prepare_preview
+from music_browser import MusicBrowser, TreeSort, prepare_preview
 from music_catalog import CatalogClient
+from round_theme import install as install_round_theme
 import settings
 from storage import destination_for, publish, volume_identity
 
@@ -33,16 +35,16 @@ from storage import destination_for, publish, volume_identity
 QUALITY = {"AAC": "AAC-LC · 兼容", "ALAC": "ALAC · 无损", "ATMOS": "Dolby Atmos"}
 PAGES = {"music": "音乐", "library": "资料库", "download": "下载队列",
          "account": "账户", "settings": "设置", "components": "组件"}
-BG = "#edf3f2"
+BG = "#eff5f2"
 PANEL = "#ffffff"
 INK = "#152d32"
-MUTED = "#486367"
+MUTED = "#405d60"
 NAV = "#102b31"
 NAV_ACTIVE = "#24524f"
 NAV_ACCOUNT = "#1b3b40"
 NAV_SIGNED_IN = "#a3f6dc"
 ACCENT = "#11715e"
-BORDER = "#c9d9d5"
+BORDER = "#cdded6"
 
 
 def backend_locations():
@@ -214,6 +216,7 @@ class Studio:
         self.service_busy = False
         self.auth_busy = False
         self.pending_region = None
+        self.verification = None
         try:
             self.preferences = settings.load()
             load_error = ""
@@ -233,6 +236,7 @@ class Studio:
         self.output_label = tk.StringVar(window, audio.OUTPUTS[self.fields["output"].get()])
         self.account_status = tk.StringVar(window)
         self.profile_text = tk.StringVar(window, "登录")
+        self.profile_connected = False
         self.path_summary = tk.StringVar(window)
         self.status = tk.StringVar(window, load_error or "就绪")
         self.engine_status = tk.StringVar(window)
@@ -240,7 +244,6 @@ class Studio:
         self.token = tk.StringVar(window)
         self.username = tk.StringVar(window)
         self.password = tk.StringVar(window)
-        self.auth_code = tk.StringVar(window)
         self.auth_status = tk.StringVar(window)
         self.native_status = None
         self.pages = {}
@@ -261,7 +264,12 @@ class Studio:
         window.columnconfigure(1, weight=1)
 
         installed_fonts = set(font.families(window))
-        self.font = "Inter" if "Inter" in installed_fonts else "Segoe UI"
+        self.font = next((family for family in ("Microsoft YaHei UI", "Inter", "Segoe UI")
+                          if family in installed_fonts), "TkDefaultFont")
+        self.wordmark_font = next((family for family in ("Inter", "Segoe UI Variable Display", "Segoe UI")
+                                   if family in installed_fonts), self.font)
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
+            font.nametofont(name, root=window).configure(family=self.font, size=11)
         self.configure_style()
 
         self.make_sidebar()
@@ -279,7 +287,7 @@ class Studio:
         self.music_browser = MusicBrowser(self, self.pages["music"])
         self.library_browser = MusicBrowser(self, self.pages["library"], private=True)
         self.make_download()
-        self.make_account()
+        build_account_page(self)
         self.make_settings()
         self.make_components()
         self.refresh_account()
@@ -288,6 +296,8 @@ class Studio:
             self.fields[key].trace_add("write", self.update_path)
         self.update_path()
         self.show("music")
+        if self.preferences.get("session"):
+            self.library_browser.ensure_loaded()
         self.pump_timer = window.after(80, self.pump)
         self.start_timer = None
         if self.fields["auto_service"].get() and (
@@ -305,28 +315,23 @@ class Studio:
         brand.grid(row=0, column=0, padx=15, pady=(21, 20), sticky="w")
         self.brand_label = tk.Label(brand, background=NAV, borderwidth=0, padx=0, pady=0)
         self.brand_label.pack(side="left")
-        tk.Label(brand, text=APP_TITLE, font=(self.font, 19, "bold"),
+        tk.Label(brand, text=APP_TITLE, font=(self.wordmark_font, 20, "bold"),
                  background=NAV, foreground="white", padx=0, pady=0).pack(side="left", padx=(7, 0))
 
         primary_pages = [(key, label) for key, label in PAGES.items() if key != "account"]
         for row, (key, label) in enumerate(primary_pages, 1):
-            button = tk.Button(
-                self.rail, text=label, command=lambda page=key: self.show(page), background=NAV,
-                activebackground=NAV_ACTIVE, foreground="white", activeforeground="white",
-                relief="flat", anchor="w", font=(self.font, 11), padx=13, pady=8, cursor="hand2",
-            )
-            button.grid(row=row, column=0, sticky="ew", padx=9, pady=2)
+            button = ttk.Button(self.rail, text=label, command=lambda page=key: self.show(page),
+                                style="Nav.TButton", cursor="hand2")
+            button.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
             self.navigation[key] = button
 
         spacer = len(primary_pages) + 1
         self.rail.rowconfigure(spacer, weight=1)
-        self.profile_button = tk.Button(
+        self.profile_button = ttk.Button(
             self.rail, textvariable=self.profile_text, command=lambda: self.show("account"),
-            background=NAV_ACCOUNT, activebackground=NAV_ACTIVE, foreground="white",
-            activeforeground="white", compound="left", anchor="w", borderwidth=0, relief="flat",
-            font=(self.font, 11, "bold"), padx=10, pady=9, cursor="hand2", takefocus=True,
+            style="Account.TButton", compound="left", cursor="hand2", takefocus=True,
         )
-        self.profile_button.grid(row=spacer + 1, column=0, sticky="ew", padx=9, pady=(10, 13))
+        self.profile_button.grid(row=spacer + 1, column=0, sticky="ew", padx=10, pady=(11, 14))
         self.navigation["account"] = self.profile_button
         self.sidebar_assets = {
             prefix: {int(path.stem.rsplit("-", 1)[1]): path for path in (ROOT / "assets").glob(f"{prefix}-[0-9]*.png")
@@ -367,56 +372,68 @@ class Studio:
     def configure_style(self):
         style = ttk.Style(self.window)
         style.theme_use("clam")
-        style.configure(".", font=(self.font, 10), foreground=INK)
-        style.configure("TButton", background=PANEL, foreground=INK, bordercolor=BORDER,
-                        focuscolor=ACCENT, padding=(10, 6))
-        style.map("TButton", background=[("active", "#e3efeb")], foreground=[("disabled", "#899c98")])
-        style.configure("Primary.TButton", background=ACCENT, foreground="white", bordercolor=ACCENT)
-        style.map("Primary.TButton", background=[("disabled", "#c9d9d5"), ("active", "#0d594c")],
-                  foreground=[("disabled", "#617b73")])
+        style.configure(".", font=(self.font, 11), foreground=INK)
+        style.configure("TButton", padding=(13, 7))
+        self.round_style_images = install_round_theme(
+            style, self.window, self.scale, bg=BG, panel=PANEL, ink=INK, muted=MUTED, accent=ACCENT,
+            border=BORDER, nav=NAV, nav_active=NAV_ACTIVE, nav_account=NAV_ACCOUNT,
+            nav_signed_in=NAV_SIGNED_IN,
+        )
+        style.configure("MusicSearch.TEntry", padding=(13, 8))
+        for name in ("Nav", "NavActive"):
+            style.configure(f"{name}.TButton", font=(self.font, 11))
+        for name in ("Account", "AccountActive", "AccountSignedIn", "AccountSignedInActive"):
+            style.configure(f"{name}.TButton", font=(self.font, 11, "bold"))
         style.configure("TCheckbutton", background=PANEL, foreground=INK)
         style.configure("Surface.TFrame", background=BG)
-        style.configure("Selected.TButton", background="#e0f0e9", foreground=ACCENT, bordercolor="#95bfb1")
-        style.configure("TEntry", padding=4, fieldbackground=PANEL)
-        style.configure("MusicSearch.TEntry", padding=(11, 8), fieldbackground=PANEL, bordercolor=BORDER)
-        style.configure("TCombobox", padding=4, fieldbackground=PANEL, background=PANEL)
-        style.map("TCombobox", fieldbackground=[("readonly", PANEL)], selectforeground=[("readonly", INK)],
-                  selectbackground=[("readonly", PANEL)])
-        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#dce8e3",
-                        lightcolor=ACCENT, darkcolor=ACCENT, bordercolor="#dce8e3")
-        style.configure("Music.Treeview", rowheight=max(52, round(55 * self.scale)), font=(self.font, 11),
-                        fieldbackground=PANEL, background=PANEL, bordercolor=BORDER, foreground=INK)
-        style.configure("Music.Treeview.Heading", padding=(6, 7), font=(self.font, 10, "bold"),
-                        background="#e3ede8", foreground=INK)
-        style.map("Music.Treeview", background=[("selected", "#cce7db")], foreground=[("selected", INK)])
-        style.configure("Queue.Treeview", rowheight=round(38 * self.scale), font=(self.font, 11),
-                        fieldbackground=PANEL, background=PANEL, bordercolor=BORDER, foreground=INK)
-        style.configure("Queue.Treeview.Heading", padding=(6, 7), font=(self.font, 10, "bold"),
-                        background="#e3ede8", foreground=INK)
-        style.map("Queue.Treeview", background=[("selected", "#cce7db")], foreground=[("selected", INK)])
+        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#e0ebe6",
+                        lightcolor=ACCENT, darkcolor=ACCENT, bordercolor="#e0ebe6", thickness=6)
+        for name, height in (("Music", 55), ("Queue", 38)):
+            style.configure(f"{name}.Treeview", rowheight=round(height * self.scale), font=(self.font, 11),
+                            fieldbackground=PANEL, background=PANEL, foreground=INK, relief="flat",
+                            borderwidth=0, bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL)
+            style.configure(f"{name}.Treeview.Heading", padding=(7, 9), font=(self.font, 10, "bold"),
+                            background=PANEL, foreground=MUTED, bordercolor=PANEL,
+                            lightcolor=PANEL, darkcolor=PANEL, relief="flat")
+            style.map(f"{name}.Treeview", background=[("selected", "#dbefe5")], foreground=[("selected", INK)])
+            style.map(f"{name}.Treeview.Heading", background=[("active", "#eef6f1")])
 
     def label(self, parent, text="", *, variable=None, large=False, muted=False, background=PANEL, wrap=615):
         options = {"textvariable": variable} if variable is not None else {"text": text}
         return tk.Label(parent, **options, background=background, foreground=MUTED if muted else INK,
                         justify="left", anchor="w", wraplength=wrap,
-                        font=(self.font, 22, "bold") if large else (self.font, 10))
+                        font=(self.font, 21, "bold") if large else (self.font, 10 if muted else 11))
 
     def header(self, page, title, detail):
         self.label(page, title, large=True, background=BG).grid(row=0, column=0, sticky="w")
         self.label(page, detail, muted=True, background=BG).grid(row=1, column=0, sticky="w", pady=(4, 13))
 
+    def panel(self, parent, padding=(14, 12)):
+        return ttk.Frame(parent, style="Card.TFrame", padding=padding)
+
     def card(self, page, row):
-        card = tk.Frame(page, bg=PANEL, padx=14, pady=12, highlightbackground=BORDER, highlightthickness=1)
+        card = self.panel(page)
         card.grid(row=row, column=0, sticky="nsew", pady=(0, 9))
         return card
 
     def action(self, parent, text, command, primary=False):
-        return ttk.Button(parent, text=text, command=command, style="Primary.TButton" if primary else "TButton")
+        container = parent
+        inside_card = False
+        while container is not None and container is not self.window:
+            if isinstance(container, ttk.Frame) and container.cget("style") == "Card.TFrame":
+                inside_card = True
+                break
+            container = container.master
+        if inside_card:
+            style = "CardPrimary.TButton" if primary else "Card.TButton"
+        else:
+            style = "Primary.TButton" if primary else "TButton"
+        return ttk.Button(parent, text=text, command=command, style=style)
 
     def textbox(self, parent, height, **options):
         return tk.Text(parent, height=height, wrap="word", padx=8, pady=5, borderwidth=0,
-                       highlightbackground=BORDER, highlightcolor=ACCENT, highlightthickness=1,
-                       bg="#f6faf8", fg=INK, insertbackground=INK, font=(self.font, 10), **options)
+                       highlightthickness=0, bg=PANEL, fg=INK, insertbackground=INK,
+                       font=(self.font, 11), **options)
 
     def make_download(self):
         page = self.pages["download"]
@@ -433,7 +450,8 @@ class Studio:
         options.grid(row=1, column=0, sticky="ew", pady=(12, 8))
         options.columnconfigure(1, weight=1)
         self.quality_box = ttk.Combobox(options, textvariable=self.quality_label,
-                                        values=list(QUALITY.values()), state="readonly", width=17)
+                                        values=list(QUALITY.values()), state="readonly", width=17,
+                                        style="Surface.TCombobox")
         self.quality_box.grid(row=0, column=0, sticky="w")
         self.quality_box.bind("<<ComboboxSelected>>", self.quality_changed)
         self.label(options, variable=self.path_summary, background=BG, muted=True, wrap=390).grid(
@@ -441,7 +459,7 @@ class Studio:
         self.action(options, "保存目录", self.browse_folder).grid(row=0, column=2)
         self.action(options, "打开", self.open_folder).grid(row=0, column=3, padx=(6, 0))
 
-        results = ttk.Frame(page, style="Surface.TFrame")
+        results = self.panel(page, padding=(8, 6))
         results.grid(row=2, column=0, sticky="nsew")
         results.columnconfigure(0, weight=1)
         results.rowconfigure(0, weight=1)
@@ -452,6 +470,8 @@ class Studio:
         ):
             self.queue_tree.heading(name, text=label)
             self.queue_tree.column(name, width=width, minwidth=minimum, stretch=name != "state")
+        self.queue_sort = TreeSort(self.queue_tree, {"title": "名称", "artist": "艺人", "state": "状态"},
+                                   lambda row, column: self.queue_tree.set(row, column))
         self.queue_tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(results, command=self.queue_tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -492,6 +512,7 @@ class Studio:
             self.queue_items[row] = url
             self.queue_rows[url] = row
             self.queue_states[url] = "待下载"
+        self.queue_sort.apply()
         self.update_queue_count()
         if accepted and begin:
             self.show("download")
@@ -503,6 +524,8 @@ class Studio:
         if url in self.queue_rows:
             self.queue_states[url] = state
             self.queue_tree.set(self.queue_rows[url], "state", state)
+            if self.queue_sort.column == "state":
+                self.queue_sort.apply()
             self.update_queue_count()
 
     def update_queue_count(self):
@@ -539,10 +562,13 @@ class Studio:
         popup = tk.Toplevel(self.window)
         popup.title("添加链接")
         popup.transient(self.window)
+        popup.configure(background=BG)
         popup.columnconfigure(0, weight=1)
         popup.rowconfigure(0, weight=1)
-        entry = self.textbox(popup, 5, undo=True, width=58)
-        entry.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+        field = self.panel(popup, padding=(6, 6))
+        field.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+        entry = self.textbox(field, 5, undo=True, width=58)
+        entry.pack(fill="both", expand=True)
 
         def accept():
             if self.add_link_text(entry.get("1.0", "end")):
@@ -560,58 +586,17 @@ class Studio:
         popup = tk.Toplevel(self.window)
         popup.title("下载记录")
         popup.transient(self.window)
+        popup.configure(background=BG)
         popup.columnconfigure(0, weight=1)
         popup.rowconfigure(0, weight=1)
-        history = self.textbox(popup, 12, width=65)
-        history.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        panel = self.panel(popup, padding=(6, 6))
+        panel.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        history = self.textbox(panel, 12, width=65)
+        history.pack(fill="both", expand=True)
         history.insert("1.0", "\n".join(self.history))
         history.configure(state="disabled")
         self.history_text = history
         self.history_window = popup
-
-    def make_account(self):
-        page = self.pages["account"]
-        self.header(page, "Apple Music 账户", "登录成功后会记住会话，下次打开 amdl 会自动恢复。")
-        card = self.card(page, 2)
-        card.columnconfigure(1, weight=1)
-        self.label(card, variable=self.account_status).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        self.label(card, "Apple 账号").grid(row=1, column=0, sticky="w")
-        self.user_entry = ttk.Entry(card, textvariable=self.username)
-        self.user_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0))
-        self.label(card, "密码").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.password_entry = ttk.Entry(card, textvariable=self.password, show="•")
-        self.password_entry.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=(8, 0))
-        self.label(card, "账号地区").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(card, textvariable=self.fields["region"], width=7).grid(
-            row=3, column=1, sticky="w", padx=12, pady=(8, 0))
-        self.code_label = self.label(card, "验证码")
-        self.code_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
-        self.code_entry = ttk.Entry(card, textvariable=self.auth_code, width=12)
-        self.code_entry.grid(row=4, column=1, sticky="w", padx=12, pady=(8, 0))
-        self.code_label.grid_remove()
-        self.code_entry.grid_remove()
-        actions = tk.Frame(card, bg=PANEL)
-        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self.login_button = self.action(actions, "登录", self.login_account, primary=True)
-        self.login_button.pack(side="left")
-        self.cancel_auth_button = self.action(actions, "取消验证", self.reset_login)
-        self.logout_button = self.action(actions, "退出登录", self.logout_account)
-        self.logout_button.pack(side="right")
-        self.label(card, variable=self.auth_status, muted=True).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(7, 0))
-
-        self.legacy_card = self.card(page, 3)
-        self.legacy_card.columnconfigure(1, weight=1)
-        self.label(self.legacy_card, "会话令牌").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self.legacy_card, textvariable=self.token, show="•").grid(
-            row=0, column=1, sticky="ew", padx=(12, 0))
-        legacy_actions = tk.Frame(self.legacy_card, bg=PANEL)
-        legacy_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.action(legacy_actions, "保存会话", self.save_account).pack(side="left")
-        self.action(legacy_actions, "导入 apmyx", self.import_account).pack(side="left", padx=7)
-        self.legacy_card.grid_remove()
-        self.legacy_toggle = self.action(page, "兼容会话设置", self.toggle_legacy)
-        self.legacy_toggle.grid(row=4, column=0, sticky="w")
 
     def make_settings(self):
         page = self.pages["settings"]
@@ -662,17 +647,24 @@ class Studio:
         self.active_page = page
         self.pages[page].tkraise()
         for key, button in self.navigation.items():
-            normal = NAV_ACCOUNT if key == "account" else NAV
-            button.configure(background=NAV_ACTIVE if key == page else normal)
+            if key != "account":
+                button.configure(style="NavActive.TButton" if key == page else "Nav.TButton")
+        self.update_profile_style()
         if page == "music":
             self.music_browser.ensure_loaded()
         elif page == "library":
             self.library_browser.ensure_loaded()
         elif page == "account" and not self.auth_busy:
-            if self.pending_region:
-                self.code_entry.focus_set()
+            if self.verification is not None:
+                self.verification.focus()
             elif not self.preferences.get("native_account") and not self.preferences.get("session"):
                 self.user_entry.focus_set()
+
+    def update_profile_style(self):
+        name = "AccountSignedIn" if self.profile_connected else "Account"
+        if self.active_page == "account":
+            name += "Active"
+        self.profile_button.configure(style=name + ".TButton")
 
     def catalog_region(self):
         region = self.fields["region"].get().strip().lower()
@@ -756,41 +748,33 @@ class Studio:
     def library_token(self):
         return settings.session(self.preferences)
 
-    def saved_apmyx_session(self):
-        for folder in backend_locations()[1:]:
-            if (folder / "config.yaml").is_file():
-                value = Engine(ROOT, folder).read_config()
-                if value.get("media-user-token"):
-                    return value
-        raise ValueError("本机 apmyx 配置中没有可导入的会话。")
-
     def connect_library(self):
         dialog = tk.Toplevel(self.window)
-        dialog.title("连接资料库")
+        dialog.title("连接 Apple Music 资料库")
         dialog.transient(self.window)
+        dialog.configure(background=BG)
         dialog.columnconfigure(0, weight=1)
+        card = self.panel(dialog, padding=(16, 14))
+        card.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        card.columnconfigure(0, weight=1)
         token = tk.StringVar(dialog)
-        self.label(dialog, "Apple Music 网页会话令牌", background=dialog.cget("background")).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(14, 5))
-        entry = ttk.Entry(dialog, textvariable=token, show="•", width=55)
-        entry.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
-        actions = ttk.Frame(dialog)
-        actions.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 12))
+        self.label(card, "Apple Music 网页会话令牌").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        entry = ttk.Entry(card, textvariable=token, show="•", width=46)
+        entry.grid(row=1, column=0, sticky="ew")
+        actions = tk.Frame(card, bg=PANEL)
+        actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
-        def accept(imported=False):
+        def accept():
             try:
-                session = self.saved_apmyx_session() if imported else {"media-user-token": token.get()}
                 values = dict(self.preferences)
-                values["session"] = settings.protect_session(session["media-user-token"])
-                if not values["native_account"] and re.fullmatch(r"[a-z]{2}", session.get("storefront", "")):
-                    values["region"] = session["storefront"]
+                values["session"] = settings.protect_session(token.get())
                 self.store(values)
                 token.set("")
                 dialog.destroy()
             except (OSError, RuntimeError, ValueError) as error:
                 messagebox.showerror("无法连接资料库", str(error), parent=dialog)
 
-        self.action(actions, "导入 apmyx", lambda: accept(True)).pack(side="left")
+        self.action(actions, "打开 Apple Music", lambda: webbrowser.open("https://music.apple.com/")).pack(side="left")
         self.action(actions, "连接", accept, primary=True).pack(side="right")
         entry.bind("<Return>", lambda _: accept())
         dialog.bind("<Escape>", lambda _: dialog.destroy())
@@ -825,7 +809,8 @@ class Studio:
             self.account_status.set("请登录 Apple Music")
             caption = "登录"
         self.profile_text.set("处理中" if self.auth_busy else caption)
-        self.profile_button.configure(foreground=NAV_SIGNED_IN if signed_in or legacy else "white")
+        self.profile_connected = signed_in or bool(legacy)
+        self.update_profile_style()
         self.logout_button.configure(state="normal" if not self.auth_busy and (remembered or legacy) else "disabled")
 
     def toggle_legacy(self):
@@ -876,7 +861,7 @@ class Studio:
         self.refresh_account()
         if previous_session != values.get("session"):
             self.library_browser.invalidate()
-            if self.active_page == "library":
+            if self.active_page == "library" or values.get("session"):
                 self.library_browser.ensure_loaded()
 
     def error(self, title, problem):
@@ -918,52 +903,63 @@ class Studio:
     def set_auth_busy(self, active):
         self.auth_busy = active
         state = "disabled" if active else "normal"
-        for widget in (self.user_entry, self.password_entry, self.code_entry, self.login_button,
-                       self.cancel_auth_button, self.legacy_toggle):
+        for widget in (self.user_entry, self.password_entry, self.region_entry, self.login_button, self.legacy_toggle):
             widget.configure(state=state)
+        if self.verification is not None:
+            self.verification.set_busy(active)
         self.refresh_account()
 
     def reset_login(self):
         self.pending_region = None
-        self.password.set("")
-        self.auth_code.set("")
-        self.code_label.grid_remove()
-        self.code_entry.grid_remove()
-        self.cancel_auth_button.pack_forget()
-        self.login_button.configure(text="登录")
+        if self.verification is not None:
+            self.verification.dismiss()
+            self.verification = None
+
+    def cancel_verification(self):
+        self.reset_login()
+        self.auth_status.set("已取消验证。")
+        self.set_auth_busy(True)
+
+        def run():
+            try:
+                self.login_service.cancel_login()
+            finally:
+                self.post("auth_done", None)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def login_account(self):
         if self.auth_busy or self.busy:
+            return
+        if self.verification is not None:
+            self.verification.focus()
             return
         region = self.fields["region"].get().strip().lower()
         if not re.fullmatch(r"[a-z]{2}", region):
             self.error("无法登录", "请输入两位字母的账号地区，例如 au、cn 或 us。")
             return
-        code = None
-        if self.pending_region:
-            username = password = ""
-            region = self.pending_region
-            code = self.auth_code.get().strip()
-            if not re.fullmatch(r"[0-9]{6}", code):
-                self.error("无法登录", "请输入收到的 6 位验证码。")
-                return
-        else:
-            username, password = self.username.get().strip(), self.password.get()
-            if not username or not password:
-                self.error("无法登录", "请输入 Apple 账号和密码。")
-                return
-        self.password.set("")
-        self.auth_code.set("")
+        username, password = self.username.get().strip(), self.password.get()
+        if not username or not password:
+            self.error("无法登录", "请输入 Apple 账号和密码。")
+            return
+        self.request_login(username, password, region)
+
+    def submit_verification(self, code):
+        if not self.auth_busy and self.pending_region is not None:
+            self.request_login("", "", self.pending_region, code)
+
+    def request_login(self, username, password, region, code=None):
         self.auth_stop.clear()
         self.set_auth_busy(True)
-        self.auth_status.set("正在连接本地登录服务…")
+        self.auth_status.set("正在验证…" if code else "正在连接本地登录服务…")
 
         def run():
             try:
                 self.login_service.start(self.auth_stop, lambda value: self.post("auth_status", value))
                 if self.auth_stop.is_set():
                     return
-                self.post("auth_status", "正在等待 Apple 登录结果…")
+                if not code:
+                    self.post("auth_status", "正在等待 Apple 登录结果…")
                 result = self.login_service.login(username, password, code=code)
                 if result.get("logged_in"):
                     state = self.login_service.status()
@@ -976,7 +972,7 @@ class Studio:
                     region_to_save = region
                 self.post("login_result", (result, region_to_save))
             except (OSError, RuntimeError, ValueError) as error:
-                self.post("auth_status", str(error))
+                self.post("auth_error", (str(error), bool(code and self.login_service.login_id)))
             finally:
                 self.post("auth_done", None)
 
@@ -985,11 +981,12 @@ class Studio:
     def finish_login(self, result, region):
         if result.get("needs_code"):
             self.pending_region = region
-            self.code_label.grid()
-            self.code_entry.grid()
-            self.cancel_auth_button.pack(side="left", padx=7)
-            self.login_button.configure(text="验证并登录")
-            self.auth_status.set("Apple 要求双重认证，请输入设备或短信收到的验证码。")
+            if self.verification is None:
+                self.verification = VerificationDialog(self, self.submit_verification, self.cancel_verification)
+                self.verification.set_busy(self.auth_busy)
+            else:
+                self.verification.set_error("验证码未通过，请重试。")
+            self.auth_status.set("等待验证码。")
             return
         self.reset_login()
         if not result.get("logged_in"):
@@ -1000,7 +997,8 @@ class Studio:
             self.store(values)
             self.native_status = result
             self.refresh_account()
-            self.username.set("")
+            if values.get("session"):
+                self.library_browser.refresh()
             self.auth_status.set("登录成功。此会话将在下次启动时恢复。")
         except (OSError, ValueError) as error:
             self.auth_status.set(str(error))
@@ -1028,33 +1026,21 @@ class Studio:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def save_account(self, imported=None):
+    def save_account(self):
         if self.auth_busy or self.busy:
             return
         try:
             values = self.snapshot()
-            token = imported if imported is not None else self.token.get()
+            token = self.token.get()
             if token.strip():
                 values["session"] = settings.protect_session(token)
             elif not values.get("session"):
-                raise ValueError("请输入会话令牌，或从 apmyx 导入。")
-            values["native_account"] = False
-            self.fields["native_account"].set(False)
+                raise ValueError("请输入 Apple Music 网页会话令牌。")
             self.store(values)
             self.token.set("")
-            self.auth_status.set("已切换到兼容会话。")
+            self.auth_status.set("已连接 Apple Music 网页会话。")
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法保存账户", error)
-
-    def import_account(self):
-        if self.auth_busy or self.busy:
-            return
-        try:
-            imported = self.saved_apmyx_session()
-            self.fields["region"].set(imported.get("storefront") or self.fields["region"].get())
-            self.save_account(imported["media-user-token"])
-        except (OSError, RuntimeError, ValueError) as error:
-            self.error("无法导入 apmyx", error)
 
     def clear_account(self):
         try:
@@ -1066,6 +1052,7 @@ class Studio:
             self.store(values)
             self.token.set("")
             self.reset_login()
+            self.password.set("")
             self.auth_status.set("已退出登录。")
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法清除会话", error)
@@ -1121,8 +1108,9 @@ class Studio:
         try:
             if links is None:
                 selected = {self.queue_items[row] for row in self.queue_tree.selection()}
-                links = [url for url, state in self.queue_states.items() if
-                         (url in selected if selected else state != "已完成")]
+                ordered = (self.queue_items[row] for row in self.queue_tree.get_children())
+                links = [url for url in ordered if
+                         (url in selected if selected else self.queue_states[url] != "已完成")]
             if not links:
                 self.status.set("队列里没有待下载项目。")
                 return
@@ -1179,7 +1167,7 @@ class Studio:
         self.stop_preview()
         self.service_stop.set()
         self.auth_stop.set()
-        self.pending_region = None
+        self.reset_login()
         if self.busy:
             self.cancel()
         self.finish_close()
@@ -1239,14 +1227,21 @@ class Studio:
                 self.refresh_account()
             elif kind == "auth_status":
                 self.auth_status.set(value)
+            elif kind == "auth_error":
+                message, retry_code = value
+                if self.verification is not None and retry_code:
+                    self.verification.set_error(message)
+                else:
+                    self.reset_login()
+                self.auth_status.set(message)
             elif kind == "login_result" and not self.closing:
                 self.finish_login(*value)
             elif kind == "logout_result":
                 self.clear_account()
             elif kind == "auth_done":
                 self.set_auth_busy(False)
-                if self.pending_region:
-                    self.code_entry.focus_set()
+                if self.verification is not None:
+                    self.verification.focus()
                 if self.finish_close():
                     return
             elif kind == "service_done":
