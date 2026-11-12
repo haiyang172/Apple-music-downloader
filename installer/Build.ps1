@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.2.0',
+    [string]$Version = '0.3.0',
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,
@@ -16,7 +16,7 @@ $studio = Split-Path -Parent $PSScriptRoot
 $workspace = Split-Path -Parent $studio
 if (-not $PythonLib) { $PythonLib = Join-Path $workspace 'playlist-download\python-deps' }
 if (-not $AudioTools) { $AudioTools = Join-Path $workspace 'wsl1\deps-win' }
-$distribution = Join-Path $PSScriptRoot 'dist'
+$distribution = Join-Path (Join-Path $PSScriptRoot 'dist') $Version
 $portable = Join-Path $distribution 'amdl'
 $buildTools = Join-Path $PSScriptRoot '.tools'
 $setup = Join-Path $distribution 'amdl-setup.exe'
@@ -68,7 +68,8 @@ function Get-InnoCompiler {
     return $compiler
 }
 
-$sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py')
+$sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py',
+    'music_catalog.py', 'music_library.py', 'music_browser.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
 foreach ($path in @($distribution, $buildTools)) {
     [void][IO.Directory]::CreateDirectory($path)
@@ -117,10 +118,12 @@ try {
             if ($item.Name -notin @('site-packages', '__pycache__', 'test', 'idlelib', 'ensurepip', 'tkinter_tests')) {
                 Copy-SafeTree $item.FullName (Join-Path $runtimeLib $item.Name)
             }
-        } elseif ($item.Extension -eq '.py') {
+        } elseif ($item.Extension -eq '.py' -or $item.Name -eq 'codex-rejected-cas.pem') {
             Copy-Item -LiteralPath $item.FullName -Destination $runtimeLib
         }
     }
+    & (Join-Path $runtime 'python.exe') -I -B -c 'import ssl; ssl.create_default_context()'
+    if ($LASTEXITCODE -ne 0) { throw 'The packaged Python runtime could not initialize TLS.' }
 
     $lib = Join-Path $stage 'lib'
     [void][IO.Directory]::CreateDirectory($lib)
@@ -178,7 +181,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The amdl launcher could not be compiled.' }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Portable.cmd') -Destination (Join-Path $stage 'Run.cmd')
 
-    & $InnoCompiler /Qp "/DAppVersion=$Version" "/DPayloadDir=$stage" (Join-Path $PSScriptRoot 'Setup.iss')
+    & $InnoCompiler /Qp "/O$distribution" "/DAppVersion=$Version" "/DPayloadDir=$stage" (Join-Path $PSScriptRoot 'Setup.iss')
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw 'The amdl installer could not be compiled.'
     }

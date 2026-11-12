@@ -11,6 +11,8 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, ttk
 from urllib.parse import parse_qs, urlsplit
+import webbrowser
+import winsound
 
 
 ROOT = Path(__file__).resolve().parent
@@ -22,12 +24,15 @@ for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib")
 import audio
 from engine import Cancelled, Engine
 from login_service import LoginService
+from music_browser import MusicBrowser, prepare_preview
+from music_catalog import CatalogClient
 import settings
 from storage import destination_for, publish, volume_identity
 
 
 QUALITY = {"AAC": "AAC-LC · 兼容", "ALAC": "ALAC · 无损", "ATMOS": "Dolby Atmos"}
-PAGES = {"download": "下载", "account": "账户", "settings": "设置", "components": "组件"}
+PAGES = {"music": "音乐", "library": "资料库", "download": "下载队列",
+         "account": "账户", "settings": "设置", "components": "组件"}
 BG = "#edf3f2"
 PANEL = "#ffffff"
 INK = "#152d32"
@@ -119,8 +124,11 @@ def run_download(job, stop, post, engine=None, login_service=None):
     for index, url in enumerate(job["links"], 1):
         if stop.is_set():
             break
+        before = saved + existing
+        errors_before = errors
         prefix = f"链接 {index}/{len(job['links'])}"
         post("status", prefix + " · 正在读取曲目")
+        post("queue_status", (url, "下载中"))
 
         def on_event(event):
             if event.get("event") == "progress":
@@ -136,10 +144,12 @@ def run_download(job, stop, post, engine=None, login_service=None):
             try:
                 result = engine.download(config, url, quality, stage, stop, on_event)
             except Cancelled:
+                post("queue_status", (url, "已取消"))
                 break
             except (OSError, RuntimeError, ValueError) as error:
                 errors += 1
                 post("log", f"{prefix} · {error}")
+                post("queue_status", (url, "失败"))
                 continue
             errors += result["errors"]
             for artifact in result["artifacts"]:
@@ -159,6 +169,14 @@ def run_download(job, stop, post, engine=None, login_service=None):
                 except (OSError, RuntimeError, ValueError) as error:
                     errors += 1
                     post("log", f"曲目 {artifact.get('track_id') or '?'} · {error}")
+        if stop.is_set():
+            post("queue_status", (url, "已取消"))
+        elif saved + existing == before:
+            if errors == errors_before:
+                errors += 1
+            post("queue_status", (url, "失败"))
+        else:
+            post("queue_status", (url, "部分完成" if errors > errors_before else "已完成"))
     return saved, existing, errors
 
 
@@ -171,6 +189,16 @@ class Studio:
         self.messages = queue.SimpleQueue()
         self.engine = None
         self.login_service = LoginService(ROOT, settings.DATA)
+        self.catalog = CatalogClient()
+        self.background = BG
+        self.queue_rows = {}
+        self.queue_items = {}
+        self.queue_states = {}
+        self.active_page = "music"
+        self.preview_serial = 0
+        self.preview_owner = None
+        self.preview_temp = None
+        self.preview_timer = None
         self.busy = False
         self.closing = False
         self.service_busy = False
@@ -253,6 +281,8 @@ class Studio:
             page.columnconfigure(0, weight=1)
             self.pages[key] = page
 
+        self.music_browser = MusicBrowser(self, self.pages["music"])
+        self.library_browser = MusicBrowser(self, self.pages["library"], private=True)
         self.make_download()
         self.make_account()
         self.make_settings()
@@ -262,12 +292,7 @@ class Studio:
         for key in ("folder", "category"):
             self.fields[key].trace_add("write", self.update_path)
         self.update_path()
-        if self.preferences.get("native_account") or self.preferences.get("session"):
-            self.show("download")
-            self.links.focus_set()
-        else:
-            self.show("account")
-            self.user_entry.focus_set()
+        self.show("music")
         self.pump_timer = window.after(80, self.pump)
         self.start_timer = None
         if self.fields["auto_service"].get() and (
@@ -286,12 +311,25 @@ class Studio:
         style.map("Primary.TButton", background=[("disabled", "#c9d9d5"), ("active", "#0d594c")],
                   foreground=[("disabled", "#617b73")])
         style.configure("TCheckbutton", background=PANEL, foreground=INK)
+        style.configure("Surface.TFrame", background=BG)
+        style.configure("Selected.TButton", background="#e0f0e9", foreground=ACCENT, bordercolor="#95bfb1")
         style.configure("TEntry", padding=4, fieldbackground=PANEL)
+        style.configure("MusicSearch.TEntry", padding=(11, 8), fieldbackground=PANEL, bordercolor=BORDER)
         style.configure("TCombobox", padding=4, fieldbackground=PANEL, background=PANEL)
         style.map("TCombobox", fieldbackground=[("readonly", PANEL)], selectforeground=[("readonly", INK)],
                   selectbackground=[("readonly", PANEL)])
         style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#dce8e3",
                         lightcolor=ACCENT, darkcolor=ACCENT, bordercolor="#dce8e3")
+        style.configure("Music.Treeview", rowheight=max(52, round(55 * self.scale)), font=(self.font, 11),
+                        fieldbackground=PANEL, background=PANEL, bordercolor=BORDER, foreground=INK)
+        style.configure("Music.Treeview.Heading", padding=(6, 7), font=(self.font, 10, "bold"),
+                        background="#e3ede8", foreground=INK)
+        style.map("Music.Treeview", background=[("selected", "#cce7db")], foreground=[("selected", INK)])
+        style.configure("Queue.Treeview", rowheight=round(38 * self.scale), font=(self.font, 11),
+                        fieldbackground=PANEL, background=PANEL, bordercolor=BORDER, foreground=INK)
+        style.configure("Queue.Treeview.Heading", padding=(6, 7), font=(self.font, 10, "bold"),
+                        background="#e3ede8", foreground=INK)
+        style.map("Queue.Treeview", background=[("selected", "#cce7db")], foreground=[("selected", INK)])
 
     def label(self, parent, text="", *, variable=None, large=False, muted=False, background=PANEL, wrap=615):
         options = {"textvariable": variable} if variable is not None else {"text": text}
@@ -318,44 +356,154 @@ class Studio:
 
     def make_download(self):
         page = self.pages["download"]
-        self.header(page, "下载音乐", "粘贴 Apple Music 的歌曲、专辑或歌单链接，每行一个。")
-        input_card = self.card(page, 2)
-        input_card.columnconfigure(0, weight=1)
-        self.links = self.textbox(input_card, 4, undo=True)
-        self.links.grid(row=0, column=0, columnspan=4, sticky="ew")
-        self.label(input_card, "下载音质").grid(row=1, column=0, sticky="w", pady=(9, 0))
-        self.quality_box = ttk.Combobox(input_card, textvariable=self.quality_label,
-                                        values=list(QUALITY.values()), state="readonly", width=18)
-        self.quality_box.grid(row=1, column=1, padx=(8, 10), pady=(9, 0))
-        self.quality_box.bind("<<ComboboxSelected>>", self.quality_changed)
-        self.action(input_card, "选择保存目录", self.browse_folder).grid(row=1, column=2, pady=(9, 0))
-        self.action(input_card, "打开目录", self.open_folder).grid(row=1, column=3, padx=(6, 0), pady=(9, 0))
-        self.label(input_card, variable=self.path_summary, muted=True).grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        page.rowconfigure(2, weight=1)
+        title = ttk.Frame(page, style="Surface.TFrame")
+        title.grid(row=0, column=0, sticky="ew")
+        title.columnconfigure(0, weight=1)
+        self.label(title, "下载队列", large=True, background=BG).grid(row=0, column=0, sticky="w")
+        self.action(title, "添加链接", self.link_dialog).grid(row=0, column=1, padx=(8, 0))
+        self.remove_button = self.action(title, "移除", self.remove_queued)
+        self.remove_button.grid(row=0, column=2, padx=(8, 0))
 
-        buttons = tk.Frame(page, bg=BG)
-        buttons.grid(row=3, column=0, sticky="ew", pady=(1, 9))
+        options = ttk.Frame(page, style="Surface.TFrame")
+        options.grid(row=1, column=0, sticky="ew", pady=(12, 8))
+        options.columnconfigure(1, weight=1)
+        self.quality_box = ttk.Combobox(options, textvariable=self.quality_label,
+                                        values=list(QUALITY.values()), state="readonly", width=17)
+        self.quality_box.grid(row=0, column=0, sticky="w")
+        self.quality_box.bind("<<ComboboxSelected>>", self.quality_changed)
+        self.label(options, variable=self.path_summary, background=BG, muted=True, wrap=390).grid(
+            row=0, column=1, sticky="w", padx=10)
+        self.action(options, "保存目录", self.browse_folder).grid(row=0, column=2)
+        self.action(options, "打开", self.open_folder).grid(row=0, column=3, padx=(6, 0))
+
+        results = ttk.Frame(page, style="Surface.TFrame")
+        results.grid(row=2, column=0, sticky="nsew")
+        results.columnconfigure(0, weight=1)
+        results.rowconfigure(0, weight=1)
+        self.queue_tree = ttk.Treeview(results, columns=("title", "artist", "state"),
+                                       show="headings", selectmode="extended", style="Queue.Treeview")
+        for name, label, width, minimum in (
+            ("title", "名称", 360, 140), ("artist", "艺人", 160, 85), ("state", "状态", 90, 75),
+        ):
+            self.queue_tree.heading(name, text=label)
+            self.queue_tree.column(name, width=width, minwidth=minimum, stretch=name != "state")
+        self.queue_tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(results, command=self.queue_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.queue_tree.configure(yscrollcommand=scroll.set)
+        self.queue_tree.bind("<Delete>", lambda _: self.remove_queued())
+
+        buttons = ttk.Frame(page, style="Surface.TFrame")
+        buttons.grid(row=3, column=0, sticky="ew", pady=(9, 7))
         self.start_button = self.action(buttons, "开始下载", self.start_download, primary=True)
         self.start_button.pack(side="left")
         self.cancel_button = self.action(buttons, "取消", self.cancel)
         self.cancel_button.pack(side="left", padx=7)
         self.cancel_button.configure(state="disabled")
-        self.label(buttons, variable=self.account_status, muted=True, background=BG).pack(side="right")
-
-        page.rowconfigure(4, weight=1)
-        history = self.card(page, 4)
-        history.columnconfigure(0, weight=1)
-        history.rowconfigure(1, weight=1)
-        self.label(history, "下载记录").grid(row=0, column=0, sticky="w", pady=(0, 5))
-        self.log = self.textbox(history, 4, state="disabled")
-        self.log.grid(row=1, column=0, sticky="nsew")
-        bar = ttk.Scrollbar(history, command=self.log.yview)
-        bar.grid(row=1, column=1, sticky="ns")
-        self.log.configure(yscrollcommand=bar.set)
+        self.action(buttons, "下载记录", self.history_dialog).pack(side="right")
         self.progress = ttk.Progressbar(page, mode="indeterminate")
-        self.progress.grid(row=5, column=0, sticky="ew")
+        self.progress.grid(row=4, column=0, sticky="ew")
         self.label(page, variable=self.status, background=BG, muted=True).grid(
-            row=6, column=0, sticky="w", pady=(4, 0))
+            row=5, column=0, sticky="w", pady=(4, 0))
+        self.history = []
+        self.history_text = None
+        self.history_window = None
+
+    def queue_music(self, items, begin=False):
+        accepted = {}
+        for item in items:
+            try:
+                url = read_links(item.get("url", ""))[0]
+            except ValueError:
+                continue
+            accepted[url] = None
+            if url in self.queue_rows:
+                if self.queue_states[url] != "下载中":
+                    self.set_queue_state(url, "待下载")
+                continue
+            name = item.get("title") or url
+            artist = item.get("artist") or ""
+            row = self.queue_tree.insert("", "end", values=(name, artist, "待下载"))
+            self.queue_items[row] = url
+            self.queue_rows[url] = row
+            self.queue_states[url] = "待下载"
+        self.update_queue_count()
+        if accepted and begin:
+            self.show("download")
+            if not self.busy:
+                self.start_download(list(accepted))
+        return len(accepted)
+
+    def set_queue_state(self, url, state):
+        if url in self.queue_rows:
+            self.queue_states[url] = state
+            self.queue_tree.set(self.queue_rows[url], "state", state)
+            self.update_queue_count()
+
+    def update_queue_count(self):
+        pending = sum(state in ("待下载", "下载中") for state in self.queue_states.values())
+        self.navigation["download"].configure(text=f"下载队列  {pending}" if pending else "下载队列")
+
+    def remove_queued(self):
+        if self.busy:
+            return
+        for row in self.queue_tree.selection():
+            url = self.queue_items.pop(row)
+            self.queue_rows.pop(url)
+            self.queue_states.pop(url)
+            self.queue_tree.delete(row)
+        self.update_queue_count()
+
+    def add_link_text(self, text, begin=False):
+        try:
+            links = read_links(text)
+        except ValueError as error:
+            self.error("添加链接", error)
+            return False
+        rows = []
+        for url in links:
+            parts = urlsplit(url).path.strip("/").split("/")
+            title = parts[-2].replace("-", " ") if len(parts) > 3 else url
+            rows.append({"url": url, "title": title})
+        self.queue_music(rows, begin=begin)
+        if not begin:
+            self.show("download")
+        return True
+
+    def link_dialog(self):
+        popup = tk.Toplevel(self.window)
+        popup.title("添加链接")
+        popup.transient(self.window)
+        popup.columnconfigure(0, weight=1)
+        popup.rowconfigure(0, weight=1)
+        entry = self.textbox(popup, 5, undo=True, width=58)
+        entry.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+
+        def accept():
+            if self.add_link_text(entry.get("1.0", "end")):
+                popup.destroy()
+
+        self.action(popup, "加入队列", accept, primary=True).grid(row=1, column=0, sticky="e", padx=14, pady=(0, 12))
+        popup.bind("<Escape>", lambda _: popup.destroy())
+        popup.grab_set()
+        entry.focus_set()
+
+    def history_dialog(self):
+        if self.history_window is not None and self.history_window.winfo_exists():
+            self.history_window.lift()
+            return
+        popup = tk.Toplevel(self.window)
+        popup.title("下载记录")
+        popup.transient(self.window)
+        popup.columnconfigure(0, weight=1)
+        popup.rowconfigure(0, weight=1)
+        history = self.textbox(popup, 12, width=65)
+        history.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        history.insert("1.0", "\n".join(self.history))
+        history.configure(state="disabled")
+        self.history_text = history
+        self.history_window = popup
 
     def make_account(self):
         page = self.pages["account"]
@@ -445,9 +593,139 @@ class Studio:
         self.action(buttons, "启动服务", self.start_service).pack(side="left", padx=7)
 
     def show(self, page):
+        if page != self.active_page and self.preview_owner is not None:
+            self.stop_preview()
+        self.active_page = page
         self.pages[page].tkraise()
         for key, button in self.navigation.items():
             button.configure(background=NAV_ACTIVE if key == page else NAV)
+        if page == "music":
+            self.music_browser.ensure_loaded()
+        elif page == "library":
+            self.library_browser.ensure_loaded()
+
+    def catalog_region(self):
+        region = self.fields["region"].get().strip().lower()
+        return region if re.fullmatch(r"[a-z]{2}", region) else "au"
+
+    def open_music_link(self, url):
+        try:
+            webbrowser.open(read_links(url)[0])
+        except ValueError:
+            return
+
+    def preview_music(self, browser, item):
+        self.stop_preview()
+        url = item.get("preview_url")
+        if not url:
+            browser.status.set("暂无试听。")
+            return
+        try:
+            ffmpeg = find_backend() / "tools" / "ffmpeg.exe"
+        except RuntimeError as error:
+            browser.status.set(str(error))
+            return
+        self.preview_owner = browser
+        browser.status.set("正在加载试听…")
+        browser.stop_preview.pack(side="right", padx=(0, 6))
+        serial = self.preview_serial
+
+        def fetch():
+            scratch = None
+            try:
+                scratch = tempfile.TemporaryDirectory(prefix="amdl-preview-")
+                audio_path = prepare_preview(url, ffmpeg, scratch.name)
+                if serial == self.preview_serial and not self.closing:
+                    self.post("preview", (serial, browser, item["title"], scratch, audio_path, ""))
+                    scratch = None
+            except (OSError, RuntimeError, ValueError) as error:
+                self.post("preview", (serial, browser, "", None, None, str(error)))
+            finally:
+                if scratch is not None:
+                    scratch.cleanup()
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def play_preview(self, serial, browser, title, scratch, path, error):
+        if serial != self.preview_serial or self.closing:
+            if scratch is not None:
+                scratch.cleanup()
+            return
+        if error:
+            self.stop_preview()
+            browser.status.set(error)
+            return
+        self.preview_temp = scratch
+        try:
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            browser.status.set(f"试听 · {title}")
+            self.preview_timer = self.window.after(36000, self.stop_preview)
+        except RuntimeError:
+            self.stop_preview()
+            browser.status.set("无法播放试听。")
+
+    def stop_preview(self):
+        self.preview_serial += 1
+        if self.preview_timer is not None:
+            self.window.after_cancel(self.preview_timer)
+            self.preview_timer = None
+        if self.preview_temp is not None:
+            try:
+                winsound.PlaySound(None, 0)
+                self.preview_temp.cleanup()
+            except (OSError, RuntimeError):
+                pass
+            self.preview_temp = None
+        if self.preview_owner is not None:
+            browser = self.preview_owner
+            browser.stop_preview.pack_forget()
+            if browser.status.get().startswith(("试听", "正在加载试听")):
+                browser.status.set(f"{len(browser.rows)} 项" if browser.rows else "")
+            self.preview_owner = None
+
+    def library_token(self):
+        return settings.session(self.preferences)
+
+    def saved_apmyx_session(self):
+        for folder in backend_locations()[1:]:
+            if (folder / "config.yaml").is_file():
+                value = Engine(ROOT, folder).read_config()
+                if value.get("media-user-token"):
+                    return value
+        raise ValueError("本机 apmyx 配置中没有可导入的会话。")
+
+    def connect_library(self):
+        dialog = tk.Toplevel(self.window)
+        dialog.title("连接资料库")
+        dialog.transient(self.window)
+        dialog.columnconfigure(0, weight=1)
+        token = tk.StringVar(dialog)
+        self.label(dialog, "Apple Music 网页会话令牌", background=dialog.cget("background")).grid(
+            row=0, column=0, sticky="w", padx=14, pady=(14, 5))
+        entry = ttk.Entry(dialog, textvariable=token, show="•", width=55)
+        entry.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
+        actions = ttk.Frame(dialog)
+        actions.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 12))
+
+        def accept(imported=False):
+            try:
+                session = self.saved_apmyx_session() if imported else {"media-user-token": token.get()}
+                values = dict(self.preferences)
+                values["session"] = settings.protect_session(session["media-user-token"])
+                if not values["native_account"] and re.fullmatch(r"[a-z]{2}", session.get("storefront", "")):
+                    values["region"] = session["storefront"]
+                self.store(values)
+                token.set("")
+                dialog.destroy()
+            except (OSError, RuntimeError, ValueError) as error:
+                messagebox.showerror("无法连接资料库", str(error), parent=dialog)
+
+        self.action(actions, "导入 apmyx", lambda: accept(True)).pack(side="left")
+        self.action(actions, "连接", accept, primary=True).pack(side="right")
+        entry.bind("<Return>", lambda _: accept())
+        dialog.bind("<Escape>", lambda _: dialog.destroy())
+        dialog.grab_set()
+        entry.focus_set()
 
     def update_path(self, *_):
         base = self.fields["folder"].get().strip()
@@ -505,6 +783,7 @@ class Studio:
         return values
 
     def store(self, values):
+        previous_session = self.preferences.get("session")
         settings.save(values)
         self.preferences = values
         self.fields["quality"].set(values["quality"])
@@ -512,6 +791,10 @@ class Studio:
         self.fields["region"].set(values["region"])
         self.fields["native_account"].set(values["native_account"])
         self.refresh_account()
+        if previous_session != values.get("session"):
+            self.library_browser.invalidate()
+            if self.active_page == "library":
+                self.library_browser.ensure_loaded()
 
     def error(self, title, problem):
         messagebox.showerror(title, str(problem), parent=self.window)
@@ -684,16 +967,9 @@ class Studio:
         if self.auth_busy or self.busy:
             return
         try:
-            for folder in backend_locations()[1:]:
-                if not (folder / "config.yaml").is_file():
-                    continue
-                imported = Engine(ROOT, folder).read_config()
-                token = imported.get("media-user-token", "")
-                if token:
-                    self.fields["region"].set(imported.get("storefront") or self.fields["region"].get())
-                    self.save_account(token)
-                    return
-            raise ValueError("本机 apmyx 配置中没有可导入的会话。")
+            imported = self.saved_apmyx_session()
+            self.fields["region"].set(imported.get("storefront") or self.fields["region"].get())
+            self.save_account(imported["media-user-token"])
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法导入 apmyx", error)
 
@@ -752,19 +1028,31 @@ class Studio:
             self.engine = Engine(ROOT, find_backend())
         return self.engine
 
-    def start_download(self):
+    def start_download(self, links=None):
+        if self.busy:
+            return
         if self.auth_busy:
             self.status.set("请先完成 Apple Music 登录。")
             return
         try:
+            if links is None:
+                selected = {self.queue_items[row] for row in self.queue_tree.selection()}
+                links = [url for url, state in self.queue_states.items() if
+                         (url in selected if selected else state != "已完成")]
+            if not links:
+                self.status.set("队列里没有待下载项目。")
+                return
             job = self.snapshot()
-            if not job["folder"]:
-                raise ValueError("请先选择保存目录。")
-            destination_for(job["folder"], job["category"])
-            job["links"] = read_links(self.links.get("1.0", "end"))
             if not job.get("native_account") and not job.get("session"):
                 self.show("account")
                 raise ValueError("请先登录 Apple Music。")
+            if not job["folder"]:
+                self.browse_folder()
+                job = self.snapshot()
+                if not job["folder"]:
+                    return
+            destination_for(job["folder"], job["category"])
+            job["links"] = links
             engine = self.get_engine()
             self.store(job)
         except (OSError, RuntimeError, ValueError) as error:
@@ -789,7 +1077,7 @@ class Studio:
         self.busy = busy
         state = "disabled" if busy else "normal"
         self.start_button.configure(state=state)
-        self.links.configure(state=state)
+        self.remove_button.configure(state=state)
         self.quality_box.configure(state="disabled" if busy else "readonly")
         self.cancel_button.configure(state="normal" if busy else "disabled")
         if busy:
@@ -804,6 +1092,7 @@ class Studio:
 
     def close(self):
         self.closing = True
+        self.stop_preview()
         self.service_stop.set()
         self.auth_stop.set()
         self.pending_region = None
@@ -830,10 +1119,14 @@ class Studio:
         return True
 
     def log_message(self, value):
-        self.log.configure(state="normal")
-        self.log.insert("end", value + "\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        self.history.append(value)
+        if len(self.history) > 1000:
+            self.history.pop(0)
+        if self.history_text is not None and self.history_text.winfo_exists():
+            self.history_text.configure(state="normal")
+            self.history_text.insert("end", "\n" + value)
+            self.history_text.see("end")
+            self.history_text.configure(state="disabled")
 
     def pump(self):
         for _ in range(100):
@@ -845,6 +1138,16 @@ class Studio:
                 self.status.set(value)
             elif kind == "log":
                 self.log_message(value)
+            elif kind == "queue_status":
+                self.set_queue_state(*value)
+            elif kind == "browser_result":
+                browser, *result = value
+                browser.receive(*result)
+            elif kind == "browser_art":
+                browser, *art = value
+                browser.receive_art(*art)
+            elif kind == "preview":
+                self.play_preview(*value)
             elif kind == "service":
                 self.service_status.set(value)
             elif kind == "native_status":
