@@ -32,6 +32,22 @@ class QueueTask:
     duration: float | None = None
     batch_key: str = ""
     song_edited: bool = False
+    audio_details: tuple[dict, ...] = ()
+
+
+def _audio_detail(item):
+    return (isinstance(item, dict) and isinstance(item.get("filename"), str) and bool(item["filename"])
+            and all(item.get(key) is None or isinstance(item.get(key), dict) for key in ("source", "output")))
+
+
+def _read_audio_details(encoded):
+    try:
+        records = json.loads(encoded)
+    except (TypeError, ValueError, RecursionError):
+        return ()
+    if not isinstance(records, list):
+        return ()
+    return tuple(item for item in records if _audio_detail(item))
 
 
 def _task(row):
@@ -46,6 +62,7 @@ def _task(row):
         audio_title=row["audio_title"],
         uploader=row["uploader"], source_category=row["source_category"], media_category=row["media_category"],
         duration=row["duration"], batch_key=row["batch_key"], song_edited=bool(row["song_edited"]),
+        audio_details=_read_audio_details(row["audio_details"]),
     )
 
 
@@ -77,6 +94,7 @@ class QueueStore:
                     options TEXT,
                     error TEXT NOT NULL DEFAULT '',
                     files TEXT NOT NULL DEFAULT '[]',
+                    audio_details TEXT NOT NULL DEFAULT '[]',
                     audio_title TEXT,
                     uploader TEXT NOT NULL DEFAULT '',
                     source_category TEXT NOT NULL DEFAULT '',
@@ -89,6 +107,8 @@ class QueueStore:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "audio_title" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN audio_title TEXT")
+            if "audio_details" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN audio_details TEXT NOT NULL DEFAULT '[]'")
             if "duration" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN duration REAL")
             if "song_edited" not in columns:
@@ -177,15 +197,22 @@ class QueueStore:
             """, ((encoded, task_id) for task_id in task_ids))
             return [task for task_id in task_ids if (task := self._get(db, task_id)) is not None]
 
-    def set_state(self, task_id, state, error="", files=None):
-        """Update one task, optionally replacing its cumulative output paths."""
+    def set_state(self, task_id, state, error="", files=None, audio_details=None):
+        """Update one task, optionally replacing its output paths and audio details."""
         if state not in STATES:
             raise ValueError(f"Unknown download task state: {state}")
-        encoded = json.dumps([str(path) for path in files], ensure_ascii=False) if files is not None else None
+        encoded_files = json.dumps([str(path) for path in files], ensure_ascii=False) if files is not None else None
+        encoded_details = None
+        if audio_details is not None:
+            records = list(audio_details)
+            if not all(_audio_detail(item) for item in records):
+                raise TypeError("Invalid audio details")
+            encoded_details = json.dumps(records, ensure_ascii=False, allow_nan=False)
         with closing(self._connect()) as db, db:
             db.execute("""
-                UPDATE tasks SET state = ?, error = ?, files = COALESCE(?, files) WHERE id = ?
-            """, (state, error, encoded, task_id))
+                UPDATE tasks SET state = ?, error = ?, files = COALESCE(?, files),
+                                 audio_details = COALESCE(?, audio_details) WHERE id = ?
+            """, (state, error, encoded_files, encoded_details, task_id))
             return self._get(db, task_id)
 
     def set_bilibili_metadata(self, task_id, item):
@@ -217,7 +244,7 @@ class QueueStore:
                     updated.append(self._get(db, copy.lastrowid))
                     continue
                 edit = db.execute("""
-                    UPDATE tasks SET options = ?, state = 'pending', error = '', files = '[]'
+                    UPDATE tasks SET options = ?, state = 'pending', error = '', files = '[]', audio_details = '[]'
                     WHERE id = ? AND state != 'running'
                 """, (encoded, task_id))
                 if edit.rowcount:

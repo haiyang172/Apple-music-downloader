@@ -458,6 +458,14 @@ try:
     assert app.engine.calls == [1, 2]
     first = app.queue_store.list_tasks()[0]
     assert Path(first.files[0]).parent == profile / "queue-test"
+    details, = first.audio_details
+    assert details["source"]["codec"] == details["output"]["codec"] == "AAC-LC"
+    assert details["source"]["sample_rate"] == 44100 and details["source"]["bitrate"] > 0
+    assert details["source"]["bits_per_sample"] is None
+    with patch.object(Studio.messagebox, "showinfo") as displayed:
+        app.show_task_details(str(first.id))
+        displayed.assert_called_once()
+        assert "AAC-LC" in displayed.call_args.args[1] and "kb/s" in displayed.call_args.args[1]
     queue_store = app.queue_store
 finally:
     app.close()
@@ -466,6 +474,7 @@ queue_store.set_state(queue_store.list_tasks()[1].id, "running", files=first.fil
 window, app = new_window()
 try:
     assert [task.state for task in app.tasks.values()] == ["complete", "interrupted", "pending"]
+    assert app.queue_store.get(first.id).audio_details == first.audio_details
     app.login_service = TestLogin()
     app.engine = TestEngine()
     app.start_download()
@@ -480,6 +489,7 @@ try:
     app.requeue_selected()
     repeat = app.queue_store.list_tasks()[-1]
     assert repeat.id != first.id and repeat.state == "pending"
+    assert repeat.audio_details == ()
     assert app.queue_store.get(first.id).state == "complete"
     app.start_download()
     wait_for(window, lambda: not app.busy)
@@ -1184,9 +1194,17 @@ try:
     output, = map(Path, task.files)
     assert output == local_input.with_suffix(".mp3") and mutagen.File(output).info.length > 0
     assert local_input.read_bytes() == original
+    details, = task.audio_details
+    assert details["source"]["codec"] == "AAC-LC" and details["output"]["codec"] == "MP3"
+    app.render_task(app.queue_store.set_state(task.id, "complete", audio_details=[]))
+    with patch.object(Studio.messagebox, "showinfo") as displayed:
+        app.show_task_details(str(task.id))
+        wait_for(window, lambda: displayed.called)
+        text = displayed.call_args.args[1]
+        assert "输出音频 · MP3" in text and "源音频 ·" not in text
 finally:
     app.close()
-print("Local drop routing, format selection, offline conversion, and original-file preservation passed.")
+print("Local conversion, measured source/output formats, persistent details, and older task inspection passed.")
 '@
     $smokeScript = Join-Path $testRoot 'smoke.py'
     [IO.File]::WriteAllText($smokeScript, $smokeCode, [Text.UTF8Encoding]::new($false))

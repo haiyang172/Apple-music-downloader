@@ -125,6 +125,7 @@ class Studio:
         self.queue_store = QueueStore(settings.DATA / "downloads.sqlite3")
         recovered = self.queue_store.recover()
         self.tasks = {}
+        self.task_details_serial = 0
         self.resolving_links = False
         self.links_stop = threading.Event()
         self.active_page = "music"
@@ -692,13 +693,38 @@ class Studio:
 
     def show_task_details(self, row):
         task = self.tasks[int(row)]
+        self.task_details_serial += 1
+        serial = self.task_details_serial
+        if task.audio_details or not task.files:
+            self._display_task_details(task, task.audio_details)
+            return
+
+        def inspect_files():
+            records = []
+            for value in task.files:
+                if self.closing or serial != self.task_details_serial:
+                    return
+                path = Path(value)
+                output = audio.audio_details(path) if formats_for(path) else None
+                if output:
+                    records.append({"filename": path.name, "output": output})
+            self.post("task_details", (serial, task.id, records))
+
+        threading.Thread(target=inspect_files, daemon=True).start()
+
+    def _display_task_details(self, task, records):
         lines = [task.title, TASK_LABELS[task.state]]
         if task.uploader:
             lines.append(f"投稿者 · {task.uploader}")
         if task.source_category:
             lines.append(f"分区 · {task.source_category}")
         if task.options:
-            if task.source == "bilibili":
+            if task.source == SOURCE:
+                quality = QUALITY.get(task.options.get("quality"), "")
+                output = audio.OUTPUTS.get(task.options.get("output"), "")
+                if quality or output:
+                    lines.append(" · ".join(part for part in (quality, output) if part))
+            elif task.source == "bilibili":
                 lines.append(BILI_FORMATS.get(task.options.get("bili_mode"), BILI_FORMATS["video"]))
                 if task.audio_title:
                     title = f"{task.artist} - {task.audio_title}" if task.artist else task.audio_title
@@ -717,6 +743,18 @@ class Studio:
             lines.append(str(Path(task.options["folder"]) / task_category(task)))
         if task.error:
             lines.append(task.error)
+        for record in records:
+            source = audio.describe_audio(record.get("source"))
+            output = audio.describe_audio(record.get("output"))
+            if len(records) > 1:
+                lines.append(record["filename"])
+            if source and source == output:
+                lines.append(f"源与输出音频 · {source}")
+            else:
+                if source:
+                    lines.append(f"源音频 · {source}")
+                if output:
+                    lines.append(f"输出音频 · {output}")
         lines.extend(task.files)
         messagebox.showinfo("下载任务", "\n".join(lines), parent=self.window)
 
@@ -1576,6 +1614,11 @@ class Studio:
                 if self.queue_sort.column == "state":
                     self.queue_sort.apply()
                 self.update_queue_count()
+            elif kind == "task_details":
+                serial, task_id, records = value
+                task = self.tasks.get(task_id)
+                if not self.closing and task is not None and serial == self.task_details_serial:
+                    self._display_task_details(task, task.audio_details or records)
             elif kind == "links_resolved":
                 self.finish_links(*value)
             elif kind == "bili_result":

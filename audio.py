@@ -4,15 +4,22 @@ from base64 import b64encode
 import math
 import os
 from pathlib import Path
+import struct
 import subprocess
 import tempfile
 import time
 
-from mutagen import MutagenError
+from mutagen import File, MutagenError
+from mutagen.aac import AAC
+from mutagen.ac3 import AC3
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import APIC, ID3, ID3NoHeaderError
+from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
+from mutagen.oggflac import OggFLAC
 from mutagen.oggopus import OggOpus
+from mutagen.oggvorbis import OggVorbis
+from mutagen.wave import WAVE, _WaveFile
 
 from storage import clean_name
 
@@ -35,6 +42,108 @@ _TEXT_TAGS = ("\xa9nam", "\xa9alb", "\xa9ART", "aART", "\xa9gen", "\xa9day", "\x
 
 class Cancelled(RuntimeError):
     pass
+
+
+_READABLE_AUDIO = (MP4, AAC, MP3, FLAC, OggFLAC, OggOpus, OggVorbis, WAVE, AC3)
+_STREAM_CODECS = {
+    AAC: "AAC", FLAC: "FLAC", OggFLAC: "FLAC", OggOpus: "Opus", OggVorbis: "Vorbis",
+}
+_MP4_CODECS = {
+    "mp4a.40.1": "AAC Main", "mp4a.40.2": "AAC-LC", "mp4a.40.3": "AAC-SSR", "mp4a.40.4": "AAC-LTP",
+    "mp4a.40.23": "AAC-LD", "mp4a.40.39": "AAC-ELD", "mp4a.40.42": "xHE-AAC", "mp4a.69": "MPEG 音频",
+    "mp4a.6b": "MPEG 音频", "mp4a.66": "AAC Main", "mp4a.67": "AAC-LC", "mp4a.68": "AAC-SSR",
+    "alac": "ALAC", "flac": "FLAC", "opus": "Opus", "ac-3": "AC-3", "ec-3": "E-AC-3",
+    "lpcm": "PCM", "sowt": "PCM", "twos": "PCM", "in24": "PCM", "in32": "PCM",
+}
+_WAVE_SUBTYPE_SUFFIX = bytes.fromhex("00001000800000aa00389b71")
+
+
+def _positive(value, maximum):
+    return round(value) if type(value) in (int, float) and 1 <= value <= maximum else None
+
+
+def _mp4_codec(info):
+    code = info.codec.strip().lower()
+    description = (info.codec_description or "").upper()
+    if code in ("mp4a.40.5", "mp4a.40.29") or "+SBR" in description or "+PS" in description:
+        return "HE-AAC v2" if code == "mp4a.40.29" or "+PS" in description else "HE-AAC"
+    return _MP4_CODECS.get(code, "MPEG-4 音频" if code.startswith("mp4a") else "MP4 音频")
+
+
+def _wave_format(info, path):
+    format_code, bits = info.audio_format, info.bits_per_sample
+    if format_code == 0xFFFE:
+        # Extensible WAVE can use more storage bits than the PCM signal uses.
+        with path.open("rb") as stream:
+            chunk = _WaveFile(stream)["fmt"]
+            stream.seek(chunk.data_offset)
+            fmt = stream.read(min(chunk.data_size, 40))
+        if len(fmt) < 40 or fmt[28:40] != _WAVE_SUBTYPE_SUFFIX:
+            return "WAV", None
+        format_code, = struct.unpack_from("<I", fmt, 24)
+        valid_bits, = struct.unpack_from("<H", fmt, 18)
+        bits = valid_bits if 0 < valid_bits <= bits else None
+    if format_code in (1, 3):
+        return "WAV（PCM）", bits
+    return "WAV", None
+
+
+def _stream_details(track, path):
+    kind, info = type(track), track.info
+    if info is None:
+        return None
+    bitrate = getattr(info, "bitrate", None)
+    bits = None
+    if kind is MP4:
+        codec = _mp4_codec(info)
+        if codec in ("ALAC", "FLAC", "PCM"):
+            bits = info.bits_per_sample
+    elif kind is MP3:
+        codec = {1: "MP1", 2: "MP2", 3: "MP3"}.get(info.layer, "MPEG 音频")
+    elif kind is WAVE:
+        codec, bits = _wave_format(info, path)
+        if codec == "WAV":
+            bitrate = None  # Mutagen's PCM rate formula does not apply to compressed WAV.
+    elif kind is AC3:
+        codec = "E-AC-3" if info.codec == "ec-3" else "AC-3"
+    else:
+        codec = _STREAM_CODECS[kind]
+        if kind in (FLAC, OggFLAC):
+            bits = info.bits_per_sample
+    return {"codec": codec, "bitrate": _positive(bitrate, 1_000_000_000),
+            "sample_rate": _positive(getattr(info, "sample_rate", None), 10_000_000),
+            "channels": _positive(getattr(info, "channels", None), 64), "bits_per_sample": _positive(bits, 64)}
+
+
+def audio_details(path):
+    """Read available audio parameters from a regular file with Mutagen."""
+    try:
+        path = Path(path)
+        if not path.is_file():
+            return None
+        track = File(path, options=_READABLE_AUDIO)
+        return _stream_details(track, path) if track is not None else None
+    except (MutagenError, OSError, ValueError, TypeError, KeyError, EOFError, RecursionError, struct.error):
+        return None
+
+
+def describe_audio(details):
+    """Format the available parameters for display."""
+    if not isinstance(details, dict):
+        return ""
+    codec = details.get("codec")
+    codec = codec.strip() if isinstance(codec, str) else ""
+    parts = [codec] if 0 < len(codec) <= 32 and codec.isprintable() else []
+    if bitrate := _positive(details.get("bitrate"), 1_000_000_000):
+        parts.append(f"{bitrate / 1000:.0f} kb/s")
+    if sample_rate := _positive(details.get("sample_rate"), 10_000_000):
+        parts.append(f"{sample_rate / 1000:g} kHz")
+    if codec in ("ALAC", "FLAC", "PCM", "WAV（PCM）"):
+        if bits := _positive(details.get("bits_per_sample"), 64):
+            parts.append(f"{bits} 位")
+    if channels := _positive(details.get("channels"), 64):
+        parts.append({1: "单声道", 2: "双声道"}.get(channels, f"{channels} 声道"))
+    return " · ".join(parts)
 
 
 def _run(ffmpeg, arguments, stop, error):
@@ -141,7 +250,7 @@ def _decode_duration(ffmpeg, path, stop):
 
 
 def prepare(ffmpeg, stage, artifact, quality, output_format, mp3_bitrate, stop):
-    """Return (verified staged file, filename stem), keeping audio under the stage."""
+    """Return the verified staged file, filename stem and input audio parameters."""
     if output_format not in OUTPUTS or quality not in _NATIVE_CODECS:
         raise ValueError("无法识别所选音质或输出格式。")
     if output_format == "mp3" and mp3_bitrate not in MP3_BITRATES:
@@ -181,7 +290,7 @@ def prepare(ffmpeg, stage, artifact, quality, output_format, mp3_bitrate, stop):
         tolerance = max(0.35, min(2, expected * 0.01))
         if abs(actual - expected) > tolerance:
             raise RuntimeError(f"音轨时长为 {actual:.1f} 秒，应为 {expected:.1f} 秒。请检查该音质是否只提供试听片段。")
-        return output, stem
+        return output, stem, _stream_details(original, source)
     except MutagenError:
         output.unlink(missing_ok=True)
         raise RuntimeError("无法保留音频标签。") from None

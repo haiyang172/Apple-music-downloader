@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.3.25',
+    [string]$Version = '0.3.26',
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,

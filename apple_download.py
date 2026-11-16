@@ -146,17 +146,25 @@ def _account_config(engine, login, preferences, quality, stop, post):
     return {"media-user-token": token, "storefront": preferences["region"]}
 
 
-def _record(store, task, post, state, *, error="", files=None):
-    current = store.set_state(task.id, state, error=error, files=files)
+def _record(store, task, post, state, *, error="", files=None, audio_details=None):
+    current = store.set_state(task.id, state, error=error, files=files, audio_details=audio_details)
     if current is None:
         raise RuntimeError("找不到当前下载任务。")
     post("queue_task", current)
+
+
+def _audio_result(path, filename, original=None, *, preserved=False):
+    output = audio.audio_details(path)
+    if output is None and original is None:
+        return []
+    return [{"filename": filename, "source": output if preserved and original is None else original, "output": output}]
 
 
 def _download_task(store, task, target, disk, config, engine, stop, post):
     prefix = f"{task.position}/{task.total} · {task.title}" if task.position and task.total else task.title
     options = task.options
     files = []
+    details = []
     saved = existing = 0
     last_error = ""
 
@@ -180,8 +188,8 @@ def _download_task(store, task, target, disk, config, engine, stop, post):
                 raise Cancelled()
             try:
                 post("status", prefix + " · 正在检查并保存音频")
-                source, stem = audio.prepare(engine.ffmpeg, stage, artifact, options["quality"],
-                                             options["output"], options["mp3_bitrate"], stop)
+                source, stem, original = audio.prepare(engine.ffmpeg, stage, artifact, options["quality"],
+                                                       options["output"], options["mp3_bitrate"], stop)
                 published, written = publish(source, target, stem, artifact.get("track_id"), expected_volume=disk)
             except (Cancelled, audio.Cancelled):
                 raise Cancelled() from None
@@ -193,13 +201,14 @@ def _download_task(store, task, target, disk, config, engine, stop, post):
             saved += int(written)
             existing += int(not written)
             files.append(str(published))
-            _record(store, task, post, "running", files=files)
+            details.extend(_audio_result(source, published.name, original))
+            _record(store, task, post, "running", files=files, audio_details=details)
             post("log", ("已保存  " if written else "已存在  ") + published.name)
 
     if not files or errors:
-        _record(store, task, post, "failed", error=last_error or "曲目未完整下载。", files=files)
+        _record(store, task, post, "failed", error=last_error or "曲目未完整下载。", files=files, audio_details=details)
         return saved, existing, max(1, errors)
-    _record(store, task, post, "complete", files=files)
+    _record(store, task, post, "complete", files=files, audio_details=details)
     return saved, existing, 0
 
 
@@ -323,6 +332,7 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
             except (MutagenError, OSError, ValueError):
                 post("log", f"{song} · 无法写入音频标签，仍会按识别出的歌名保存。")
         published = save(source, name)
+        details = _audio_result(source, published.name, preserved=mode != "mp3")
         for option, label, fetch, kwargs in (
             ("bili_danmaku", "弹幕", save_danmaku, {}),
             ("bili_subtitle", "人工字幕", save_subtitle, {"session": session}),
@@ -331,7 +341,7 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
         ):
             if not task.options.get(option):
                 continue
-            _record(store, task, post, "running", files=files)
+            _record(store, task, post, "running", files=files, audio_details=details)
             try:
                 sidecar = fetch(task.url, stage, stop, status, **kwargs)
                 if stop.is_set():
@@ -347,7 +357,7 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
                 attachment_errors.append(message)
                 post("log", message)
     _record(store, task, post, "failed" if attachment_errors else "complete",
-            error="\n".join(attachment_errors), files=files)
+            error="\n".join(attachment_errors), files=files, audio_details=details)
     if not attachment_errors:
         forget_bilibili_cache(store, task)
     return saved, existing, int(bool(attachment_errors))
@@ -361,9 +371,11 @@ def _convert_local(store, task, target, disk, engine, stop, post):
         raise ValueError("原文件已修改，请从「本地转码」重新添加文件。")
     _record(store, task, post, "running")
     post("status", f"正在转码 · {task.title}")
+    original = audio.audio_details(source)
     published, written = convert_file(source, options["local_format"], engine.ffmpeg, target, stop,
                                       mp3_bitrate=options["mp3_bitrate"], expected_volume=disk)
-    _record(store, task, post, "complete", files=[str(published)])
+    details = _audio_result(published, published.name, original)
+    _record(store, task, post, "complete", files=[str(published)], audio_details=details)
     post("log", ("已保存  " if written else "已存在  ") + published.name)
     return int(written), int(not written), 0
 
@@ -378,9 +390,11 @@ def _download_web(store, task, target, disk, engine, stop, post, session):
     with tempfile.TemporaryDirectory(prefix=f"amdl-{task.source}-") as working:
         stage = Path(working)
         name = task.title
+        preserved = True
         if task.source == "youtube":
-            source = download_youtube(task.url, task.options.get("youtube_mode", "video"), stage,
-                                      engine.ffmpeg, stop, status)
+            mode = task.options.get("youtube_mode", "video")
+            source = download_youtube(task.url, mode, stage, engine.ffmpeg, stop, status)
+            preserved = mode != "mp3"
         else:
             download = download_qq if task.source == "qq" else download_netease
             source = download(task.url, stage, engine.ffmpeg, stop, status, session=session,
@@ -390,7 +404,8 @@ def _download_web(store, task, target, disk, engine, stop, post, session):
         if stop.is_set():
             raise Cancelled()
         published, written = publish(source, target, name, str(task.id), expected_volume=disk)
-    _record(store, task, post, "complete", files=[str(published)])
+        details = _audio_result(source, published.name, preserved=preserved)
+    _record(store, task, post, "complete", files=[str(published)], audio_details=details)
     post("log", ("已保存  " if written else "已存在  ") + published.name)
     return int(written), int(not written), 0
 
