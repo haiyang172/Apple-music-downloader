@@ -1,6 +1,7 @@
 """Resolve Apple Music links and execute downloads from the shared queue."""
 
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import re
@@ -13,10 +14,10 @@ from mutagen.id3 import ID3, ID3NoHeaderError, TIT2, TPE1
 from mutagen.mp4 import MP4
 
 import audio
-from bili_catalog import clean_song_title, parse_video_link, resolve_video, suggest_folder
+from bili_catalog import VIDEO_BASE, clean_song_title, parse_video_link, resolve_video, suggest_folder
 from bili_download import download_video
 from bili_resume import forget_resume
-from bili_sidecars import save_danmaku, save_subtitle
+from bili_sidecars import save_cover, save_danmaku, save_subtitle
 from engine import Cancelled
 from local_convert import convert_file
 from netease_download import download_netease
@@ -91,6 +92,7 @@ def download_options(preferences):
             "bili_mode": preferences.get("bili_mode", "video"),
             "bili_danmaku": preferences.get("bili_danmaku", False),
             "bili_subtitle": preferences.get("bili_subtitle", False),
+            "bili_archive": preferences.get("bili_archive", False),
             "bili_auto_category": preferences.get("bili_auto_category", True),
             "bili_category_rules": 2,
             "youtube_mode": preferences.get("youtube_mode", "video"),
@@ -258,6 +260,30 @@ def forget_bilibili_cache(store, task):
         pass
 
 
+def _save_bili_metadata(url, stage, stop, on_status, *, task, media):
+    if stop.is_set():
+        raise Cancelled()
+    on_status("正在保存作品资料…")
+    video_id, page = parse_video_link(url)
+    metadata = {
+        "version": 1,
+        "source": "bilibili",
+        "url": f"{VIDEO_BASE}{video_id}?p={page or 1}",
+        "video_id": video_id,
+        "part": page or 1,
+        "video_title": task.title,
+        "song_title": task.audio_title,
+        "artist": task.artist,
+        "uploader": task.uploader,
+        "partition": task.source_category,
+        "duration_seconds": task.duration,
+        "media_file": media.name,
+    }
+    path = stage / "metadata.json"
+    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return path
+
+
 def _download_bilibili(store, task, target, disk, engine, stop, post, session):
     prefix = f"{task.position}/{task.total} · {task.title}" if task.position and task.total else task.title
     _record(store, task, post, "running")
@@ -299,7 +325,9 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
         published = save(source, name)
         for option, label, fetch, kwargs in (
             ("bili_danmaku", "弹幕", save_danmaku, {}),
-            ("bili_subtitle", "字幕", save_subtitle, {"session": session}),
+            ("bili_subtitle", "人工字幕", save_subtitle, {"session": session}),
+            ("bili_archive", "封面", save_cover, {}),
+            ("bili_archive", "作品资料", _save_bili_metadata, {"task": task, "media": published}),
         ):
             if not task.options.get(option):
                 continue
@@ -309,13 +337,13 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
                 if stop.is_set():
                     raise Cancelled()
                 if sidecar is None:
-                    post("log", f"{task.title} · B 站未提供人工字幕。")
+                    post("log", f"{task.title} · B 站未提供{label}。")
                 else:
                     save(sidecar, published.stem)
             except Cancelled:
                 raise
             except (OSError, RuntimeError, ValueError) as error:
-                message = f"媒体已保存，{label}保存失败：{error}"
+                message = f"媒体已保存，{label}保存失败 · {error}"
                 attachment_errors.append(message)
                 post("log", message)
     _record(store, task, post, "failed" if attachment_errors else "complete",

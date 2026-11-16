@@ -473,6 +473,7 @@ import bili_collections
 import bili_download
 import bili_resume
 import base64
+import json
 from dataclasses import replace
 from io import BytesIO
 from unittest.mock import patch
@@ -558,6 +559,7 @@ original_metadata = bili_catalog._fetch_video_metadata
 original_bili_download = apple_download.download_video
 original_danmaku = apple_download.save_danmaku
 original_subtitle = apple_download.save_subtitle
+original_cover = apple_download.save_cover
 session = BiliSession((("SESSDATA", "fixture-account-session"),))
 parts_calls = []
 
@@ -596,9 +598,15 @@ def fixture_subtitle(url, stage, stop, on_status, *, session=None):
     return target
 
 
+def fixture_cover(url, stage, stop, on_status):
+    assert url.endswith("?p=2")
+    return Path(shutil.copyfile(root / "assets/amdl-32.png", stage / "fixture-cover.png"))
+
+
 apple_download.download_video = fixture_bili_download
 apple_download.save_danmaku = fixture_danmaku
 apple_download.save_subtitle = fixture_subtitle
+apple_download.save_cover = fixture_cover
 window, app = new_window()
 try:
     app.fields["native_account"].set(False)
@@ -608,6 +616,7 @@ try:
     app.bili_format.set(Studio.BILI_FORMATS["audio"])
     app.fields["bili_danmaku"].set(True)
     app.fields["bili_subtitle"].set(True)
+    app.fields["bili_archive"].set(True)
     app.show("bilibili")
     browser = app.bili_browser
     account = browser.account
@@ -662,6 +671,14 @@ try:
     assert tags["\xa9nam"] == ["夜曲"] and tags["\xa9ART"] == ["周杰伦"]
     assert Path(task.files[1]) == Path(task.files[0]).with_suffix(".ass")
     assert Path(task.files[2]) == Path(task.files[0]).with_suffix(".srt")
+    assert Path(task.files[3]) == Path(task.files[0]).with_suffix(".png")
+    assert Path(task.files[3]).read_bytes() == (root / "assets/amdl-32.png").read_bytes()
+    metadata_path = Path(task.files[4])
+    assert metadata_path == Path(task.files[0]).with_suffix(".json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert (metadata["artist"], metadata["song_title"], metadata["part"]) == ("周杰伦", "夜曲", 2)
+    assert metadata["url"] == task.url and metadata["media_file"] == Path(task.files[0]).name
+    assert "fixture-account-session" not in metadata_path.read_text(encoding="utf-8")
     assert not any((profile / ".amdl-downloads").iterdir())
     assert parts_calls == [("BV1GJ411x7h7", session)]
     assert bili_calls == [("https://www.bilibili.com/video/BV1GJ411x7h7?p=2", "audio", session)]
@@ -720,11 +737,12 @@ finally:
     apple_download.download_video = original_bili_download
     apple_download.save_danmaku = original_danmaku
     apple_download.save_subtitle = original_subtitle
+    apple_download.save_cover = original_cover
     bili_catalog._fetch_parts = original_parts
     bili_catalog._fetch_video_metadata = original_metadata
     app.bili_auth.clear()
     app.close()
-print("Bilibili QR, encrypted session, song metadata, ASS/SRT publishing, and collection navigation passed.")
+print("Bilibili QR, encrypted session, song metadata, ASS/SRT/cover/JSON publishing, and collection navigation passed.")
 
 ffmpeg = backend / "tools/ffmpeg.exe"
 fragment = profile / "fixture-flac.m4s"
@@ -1026,6 +1044,52 @@ try:
 finally:
     app.close()
 print("QQ and NetEase song search, scroll pagination, retry, deduplication, and queue actions passed.")
+
+window, app = new_window()
+try:
+    app.show("youtube")
+    page = app.video_link_pages["youtube"]
+    requests = []
+
+    def item(index):
+        return {"source": "youtube", "title": f"试验视频 {index}", "artist": "试验频道",
+                "url": f"https://www.youtube.com/watch?v=YtFixture{index:02d}"}
+
+    def search(query, *, stop=None, offset=0):
+        assert query == "游戏原声"
+        requests.append(offset)
+        if requests == [0, 2]:
+            raise RuntimeError("临时网络错误")
+        rows = [item(1), item(2)] if offset == 0 else [item(2), item(3)]
+        return {"title": query, "rows": rows, "next_offset": 2 if offset == 0 else None}
+
+    with patch.object(youtube_download, "search_youtube", side_effect=search):
+        page.load_link("游戏原声")
+        page.read_button.invoke()
+        wait_for(window, lambda: not page.busy and len(page.rows) == 2)
+        assert str(page.download_button.cget("state")) == "disabled"
+        row = page.tree.get_children()[0]
+        page.tree.selection_set(row)
+        with patch.object(page.tree, "winfo_viewable", return_value=True):
+            page._scroll_changed("0.3", "0.91")
+            assert requests == [0]
+            page._scroll_changed("0.5", "0.96")
+        wait_for(window, lambda: not page.busy and page.page_error)
+        assert page.retry_button.winfo_manager() and len(page.rows) == 2
+        page.retry_button.invoke()
+        wait_for(window, lambda: not page.busy and len(page.rows) == 3)
+        assert page.tree.selection() == (row,) and requests == [0, 2, 2] and page.next_offset is None
+    with patch.object(app, "enqueue_tasks") as enqueue:
+        page.download_button.invoke()
+        enqueue.assert_called_once()
+        rows, begin = enqueue.call_args.args
+        assert begin and list(rows) == [item(1)]
+    with patch.object(video_links_ui.webbrowser, "open", return_value=True) as opened:
+        page.open_original()
+        opened.assert_called_once_with(item(1)["url"])
+finally:
+    app.close()
+print("YouTube search, scroll continuation, retry, selected download, and original link passed.")
 
 web = backend / "web"
 for command, version in (

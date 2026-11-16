@@ -1,10 +1,11 @@
-"""Export Bilibili danmaku and authored subtitles as local sidecar files."""
+"""Export public Bilibili covers, danmaku and authored subtitles as sidecar files."""
 
 from http.client import HTTPException
 import json
 import math
 from pathlib import Path
 import re
+import struct
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
@@ -12,7 +13,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from xml.etree import ElementTree
 import zlib
 
-from bili_catalog import VIDEO_BASE, parse_video_link, resolve_video
+from bili_catalog import VIDEO_BASE, _VideoMetadataParser, parse_video_link, resolve_video
 from engine import Cancelled
 
 
@@ -24,6 +25,12 @@ _SUBTITLE_LANG = re.compile(r"[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8}){0,3}")
 _SUBTITLE_TRACK_LIMIT = 128
 _SUBTITLE_ENTRY_LIMIT = 20_000
 _SUBTITLE_TEXT_LIMIT = 2_048
+_COVER_HOST = re.compile(r"i[0-2]\.hdslb\.com")
+_COVER_PATH = re.compile(r"/bfs/archive/[0-9a-f]{40}\.(?:jpe?g|png)(?:@[0-9A-Za-z_.-]{1,80})?", re.I)
+_COVER_MIME = {"image/jpeg", "image/jpg", "image/png"}
+_COVER_BYTES = 4 * 1024 * 1024
+_COVER_SIDE = 4_096
+_JPEG_FRAME = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
 _WIRE_LIMIT = 2 * 1024 * 1024
 _XML_LIMIT = 4 * 1024 * 1024
 _ENTRY_LIMIT = 10_000
@@ -78,6 +85,149 @@ def _decode(raw, encoding):
         if stream.eof and not stream.unused_data:
             return data
     raise RuntimeError("B 站返回了无法读取的弹幕压缩数据。")
+
+
+class _CoverMetadataParser(_VideoMetadataParser):
+    def __init__(self):
+        super().__init__()
+        self.open_graph = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "meta" and len(self.open_graph) < 6:
+            attributes = dict(attrs)
+            if attributes.get("property") == "og:image":
+                self.open_graph.append(attributes.get("content"))
+        super().handle_starttag(tag, attrs)
+
+
+def _cover_location(page):
+    parser = _CoverMetadataParser()
+    parser.feed(page.split("</head>", 1)[0])
+    thumbnail = parser.video.get("thumbnailUrl")
+    if not isinstance(thumbnail, list):
+        thumbnail = [thumbnail]
+    for value in [*thumbnail[:6], *parser.open_graph]:
+        if not isinstance(value, str) or not 0 < len(value) <= 200 or any(
+                not 33 <= ord(char) <= 126 or char == "\\" for char in value):
+            continue
+        try:
+            target = urlsplit("https:" + value if value.startswith("//") else value)
+        except ValueError:
+            continue
+        if (target.scheme == "https" and _COVER_HOST.fullmatch(target.netloc)
+                and _COVER_PATH.fullmatch(target.path) and not target.query and not target.fragment):
+            return target.geturl()
+    return None
+
+
+def _cover_resource(url, stop, *, referer=None):
+    image = referer is not None
+    size = _COVER_BYTES if image else _WIRE_LIMIT
+    headers = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity" if image else "gzip, identity",
+               "Accept": "image/jpeg, image/png" if image else "text/html"}
+    if image:
+        headers["Referer"] = referer
+    deadline = time.monotonic() + 18
+    body = bytearray()
+    _check_stop(stop)
+    try:
+        with build_opener(_NoRedirect()).open(Request(url, headers=headers), timeout=7) as response:
+            mime = response.headers.get_content_type()
+            encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+            if response.status != 200 or (image and (mime not in _COVER_MIME or encoding != "identity")):
+                raise RuntimeError("B 站返回了无法读取的封面格式。")
+            if not image and mime != "text/html":
+                return None, ""
+            while len(body) <= size:
+                _check_stop(stop)
+                if time.monotonic() > deadline:
+                    raise RuntimeError("读取 B 站封面超时，请重试。")
+                block = response.read1(min(65_536, size + 1 - len(body)))
+                if not block:
+                    break
+                body.extend(block)
+    except HTTPError as error:
+        error.close()
+        _check_stop(stop)
+        if not image and error.code in (401, 403, 404, 410, 412, 451):
+            return None, ""
+        raise RuntimeError("B 站暂未提供可读取的封面。") from None
+    except (OSError, HTTPException):
+        _check_stop(stop)
+        raise RuntimeError("无法读取 B 站封面，请检查网络后重试。") from None
+    if len(body) > size:
+        raise RuntimeError("B 站封面数据超出可读取大小。")
+    if not image:
+        try:
+            body = _decode(body, encoding)
+        except RuntimeError:
+            raise RuntimeError("B 站返回了无法读取的封面页面。") from None
+    return bytes(body), mime
+
+
+def _jpeg_dimensions(data):
+    if not data.startswith(b"\xff\xd8\xff") or not data.endswith(b"\xff\xd9"):
+        return None
+    offset = 2
+    dimensions = None
+    while offset + 4 < len(data) and data[offset] == 0xFF:
+        offset += 1
+        while offset < len(data) and data[offset] == 0xFF:
+            offset += 1
+        if offset + 2 >= len(data):
+            return None
+        marker = data[offset]
+        offset += 1
+        length = int.from_bytes(data[offset:offset + 2], "big")
+        if length < 2 or offset + length > len(data):
+            return None
+        if marker in _JPEG_FRAME and length >= 8:
+            dimensions = struct.unpack_from(">HH", data, offset + 3)
+        if marker == 0xDA:
+            return dimensions
+        offset += length
+    return None
+
+
+def _cover_extension(data, mime):
+    if mime == "image/png":
+        if not (len(data) >= 45 and data[:16] == b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                and data.endswith(b"\x00\x00\x00\x00IEND\xaeB\x60\x82")):
+            return ""
+        dimensions, extension = struct.unpack_from(">II", data, 16), ".png"
+    else:
+        dimensions, extension = _jpeg_dimensions(data), ".jpg"
+    return extension if dimensions and all(1 <= side <= _COVER_SIDE for side in dimensions) else ""
+
+
+def save_cover(url, stage, stop, on_status):
+    """Stage a cover explicitly published by the public video page if available."""
+    _check_stop(stop)
+    video, _ = parse_video_link(url)
+    canonical = f"{VIDEO_BASE}{video}/"
+    on_status("正在读取 B 站封面…")
+    page, _ = _cover_resource(canonical, stop)
+    _check_stop(stop)
+    location = _cover_location(page.decode("utf-8", "replace")) if page else None
+    if not location:
+        return None
+    image, mime = _cover_resource(location, stop, referer=canonical)
+    extension = _cover_extension(image, mime)
+    if not extension:
+        raise RuntimeError("B 站返回的封面不是可读取的 JPEG 或 PNG 图片。")
+    _check_stop(stop)
+    output = Path(stage) / f"staged-cover{extension}"
+    created = False
+    try:
+        with output.open("xb") as stream:
+            created = True
+            stream.write(image)
+        _check_stop(stop)
+    except BaseException:
+        if created:
+            output.unlink(missing_ok=True)
+        raise
+    return output
 
 
 def _fetch_xml(cid, referer, stop):

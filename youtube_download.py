@@ -19,6 +19,10 @@ _HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 _PLAYLIST_ID = re.compile(r"[A-Za-z0-9_-]{2,120}")
 _PLAYLIST_LIMIT = 500
+_SEARCH_LIMIT = 500
+_SEARCH_PAGE_SIZE = 50
+_SEARCH_TEMPLATE = ("%(.{id,title,channel,uploader,availability,live_status,is_live,is_upcoming,age_limit,has_drm,"
+                    "ie_key,duration,playlist_index})j")
 _OUTPUT_LIMIT = 16 * 1024 * 1024
 _ACCESS_ERROR = "YouTube 未提供可访问的完整视频。请在浏览器中确认链接。"
 _LINK_ERROR = "请输入 YouTube 视频、Shorts 或播放列表链接。"
@@ -63,7 +67,7 @@ def _watch(video_id):
     return f"{_BASE}/watch?v={video_id}"
 
 
-def _worker():
+def _worker(*, search=False):
     installed = _ROOT / "backend" / "web"
     source = _ROOT / "installer" / ".tools"
     python = _ROOT / "runtime" / "python.exe"
@@ -76,10 +80,11 @@ def _worker():
         python = Path(sys.executable)
         if python.name.lower() == "pythonw.exe":
             python = python.with_name("python.exe")
+    extractors = "youtube:search" if search else "youtube,youtube:tab,youtube:playlist"
     return [str(python), "-I", "-S", str(worker),
             "--ignore-config", "--no-plugin-dirs", "--no-remote-components", "--no-js-runtimes",
             "--js-runtimes", "quickjs:" + str(runtime), "--no-cache-dir", "--no-exec",
-            "--use-extractors", "youtube,youtube:tab,youtube:playlist", "--encoding", "utf-8",
+            "--use-extractors", extractors, "--encoding", "utf-8",
             "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1", "--fragment-retries", "1"]
 
 
@@ -101,9 +106,9 @@ def _public_error(stderr):
     return _ACCESS_ERROR
 
 
-def _run(arguments, directory, stop, timeout, on_status=None):
+def _run(arguments, directory, stop, timeout, on_status=None, *, search=False):
     _stop(stop)
-    command = _worker() + list(arguments)
+    command = _worker(search=search) + list(arguments)
     with TemporaryDirectory(prefix="worker-", dir=directory) as temporary, TemporaryFile() as errors:
         log = Path(temporary) / "output"
         with log.open("wb") as output, log.open("rb") as reader:
@@ -222,6 +227,50 @@ def resolve_youtube(value, stop=None):
     except (UnicodeDecodeError, ValueError):
         raise RuntimeError("YouTube 返回的信息无法读取。") from None
     return _resolved(payload, kind, identifier)
+
+
+def search_youtube(query, *, stop=None, offset=0, limit=50):
+    """Search a bounded range of public YouTube video results."""
+    query = " ".join(query.split()) if isinstance(query, str) else ""
+    if not 0 < len(query) <= 120 or any(ord(char) < 32 or char == "\x7f" or "\ud800" <= char <= "\udfff" for char in query):
+        raise ValueError("请输入 1–120 字的 YouTube 搜索关键词。")
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= _SEARCH_PAGE_SIZE:
+        raise ValueError("YouTube 搜索分页参数无效。")
+    stop = stop if stop is not None else Event()
+    _stop(stop)
+    result = {"source": "youtube", "title": query, "rows": [], "total": None, "next_offset": None}
+    if offset >= _SEARCH_LIMIT:
+        return result
+
+    end = min(offset + limit, _SEARCH_LIMIT)
+    last = min(end + 1, _SEARCH_LIMIT)
+    flags = ["--flat-playlist", "--skip-download", "--print", _SEARCH_TEMPLATE,
+             "--playlist-items", f"{offset + 1}:{last}", "--", f"ytsearch{last}:{query}"]
+    with TemporaryDirectory(prefix="amdl-youtube-search-") as temporary:
+        raw = _run(flags, temporary, stop, 90, search=True)
+
+    by_position = {}
+    for line in raw.splitlines():
+        try:
+            item = json.loads(line)
+        except (UnicodeDecodeError, ValueError):
+            raise RuntimeError("YouTube 返回的搜索结果无法读取。") from None
+        if not isinstance(item, dict):
+            continue
+        position = item.get("playlist_index")
+        if type(position) is not int or not offset < position <= last:
+            continue
+        if position > end:
+            result["next_offset"] = end
+            continue
+        video_id = item.get("id")
+        if (item.get("ie_key") == "Youtube" and isinstance(video_id, str) and _VIDEO_ID.fullmatch(video_id)
+                and item.get("availability") != "unlisted"
+                and _eligible(item, flat=True)):
+            by_position.setdefault(position, _row(item, video_id, position))
+    _stop(stop)
+    result["rows"] = [by_position[position] for position in sorted(by_position)]
+    return result
 
 
 def download_youtube(url, mode, stage, ffmpeg, stop, on_status):

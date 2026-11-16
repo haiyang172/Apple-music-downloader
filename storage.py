@@ -16,7 +16,8 @@ _DEVICE = re.compile(
     r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])",
     re.IGNORECASE,
 )
-_MEDIA_EXTENSIONS = {".m4a", ".flac", ".mp3", ".wav", ".opus", ".mp4", ".mkv", ".webm", ".ass", ".srt"}
+_OUTPUT_EXTENSIONS = {".m4a", ".flac", ".mp3", ".wav", ".opus", ".mp4", ".mkv", ".webm",
+                      ".ass", ".srt", ".jpg", ".png", ".json"}
 
 
 def clean_name(text, limit=80):
@@ -147,7 +148,7 @@ def publish(source, destination, stem, track_id, *, expected_volume=None):
     source = Path(source)
     source_info = source.lstat()
     extension = source.suffix.lower()
-    if extension not in _MEDIA_EXTENSIONS or _is_link(source_info) or not stat.S_ISREG(source_info.st_mode) or source_info.st_size == 0:
+    if extension not in _OUTPUT_EXTENSIONS or _is_link(source_info) or not stat.S_ISREG(source_info.st_mode) or source_info.st_size == 0:
         raise ValueError(f"下载文件无效：{source}")
 
     destination = _absolute(destination)

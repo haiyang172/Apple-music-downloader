@@ -1,4 +1,4 @@
-"""Browse official YouTube and Douyin links from separate desktop pages."""
+"""Search YouTube and open YouTube or Douyin links."""
 
 import re
 import threading
@@ -103,6 +103,10 @@ class VideoLinkPage:
         self.rows = {}
         self.serial = 0
         self.busy = False
+        self.search_query = ""
+        self.next_offset = None
+        self.page_error = False
+        self.seen = set()
         self.stop = threading.Event()
         name = SOURCES[source]
 
@@ -116,7 +120,7 @@ class VideoLinkPage:
         card = app.panel(page, padding=(round(16 * app.scale), round(14 * app.scale)))
         card.grid(row=1, column=0, sticky="ew", pady=(round(12 * app.scale), 0))
         card.columnconfigure(0, weight=1)
-        description = "视频、Shorts 或播放列表链接" if source == "youtube" else "视频、图文或抖音短链"
+        description = "输入关键词，或粘贴视频、Shorts 或播放列表链接" if source == "youtube" else "视频、图文或抖音短链"
         ttk.Label(card, text=description, style="MusicStatus.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
         self.entry = ttk.Entry(card, textvariable=self.link, font=(app.font, 13))
         self.entry.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -136,25 +140,37 @@ class VideoLinkPage:
         value = self.link.get().strip()
         recognized = video_link_source(value) == self.source
         self.open_button.configure(state="normal" if recognized else "disabled")
-        self.status.set(f"请输入有效的 {SOURCES[self.source]} 链接。" if value and not recognized else "")
+        query = self.source == "youtube" and not recognized and self._is_search(value)
+        invalid = value and not (recognized or query)
+        self.status.set(f"请输入有效的 {SOURCES[self.source]} 链接。" if invalid else "")
         if self.source == "youtube":
             self.stop.set()
             self.serial += 1
             self.busy = False
-            self.rows.clear()
-            self.tree.delete(*self.tree.get_children())
+            self._clear_results()
             self.caption.set("视频")
-            self.read_button.configure(state="normal" if recognized else "disabled")
+            self.read_button.configure(state="normal" if recognized or query else "disabled")
             self._update_download_buttons()
+
+    @staticmethod
+    def _is_search(value):
+        return bool(value and "://" not in value and not value.startswith("www."))
 
     def load_link(self, value):
         self.link.set(value)
 
     def open_original(self, _event=None):
         parsed = _parse_video_link(self.link.get())
-        if not self.app.closing and parsed and parsed[0] == self.source:
+        url = parsed[1] if parsed and parsed[0] == self.source else ""
+        if self.source == "youtube" and self.search_query:
+            selection = self.tree.selection()
+            item = self.rows.get(selection[0]) if len(selection) == 1 else None
+            if item:
+                result = _parse_video_link(item["url"])
+                url = result[1] if result and result[0] == "youtube" else ""
+        if not self.app.closing and url:
             try:
-                opened = webbrowser.open(parsed[1])
+                opened = webbrowser.open(url)
             except (OSError, webbrowser.Error):
                 opened = False
             if opened:
@@ -171,8 +187,11 @@ class VideoLinkPage:
 
     def _build_downloads(self, page, card):
         app = self.app
-        self.read_button = app.action(card, "读取视频", self.resolve, primary=True)
+        self.read_button = app.action(card, "查找", self.resolve, primary=True)
         self.read_button.grid(row=1, column=2, padx=(6, 0), pady=(8, 0))
+        self.retry_button = app.action(card, "重试", self._load_next)
+        self.retry_button.grid(row=2, column=2, padx=(6, 0), pady=(8, 0))
+        self.retry_button.grid_remove()
         self.entry.bind("<Return>", self.resolve)
         page.rowconfigure(2, weight=1)
         results = app.panel(page, padding=(12, 9))
@@ -195,62 +214,119 @@ class VideoLinkPage:
         self.tree.column("title", width=round(290 * app.scale), minwidth=60)
         self.tree.column("author", width=round(125 * app.scale), minwidth=45)
         self.tree.grid(row=1, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(results, command=self.tree.yview, style="Music.Vertical.TScrollbar")
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(results, command=self.tree.yview, style="Music.Vertical.TScrollbar")
+        self.scrollbar.grid(row=1, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=self._scroll_changed)
         self.tree.bind("<Control-a>", self._select_all)
+        self.tree.bind("<<TreeviewSelect>>", self._update_download_buttons)
+
+    def _clear_results(self):
+        self.search_query = ""
+        self.next_offset = None
+        self.page_error = False
+        self.seen.clear()
+        self.rows.clear()
+        self.tree.delete(*self.tree.get_children())
+        self.retry_button.grid_remove()
 
     def _select_all(self, _event):
         self.tree.selection_set(self.tree.get_children())
         return "break"
 
-    def _update_download_buttons(self):
-        state = "normal" if self.rows else "disabled"
+    def _update_download_buttons(self, _event=None):
+        selection = self.tree.selection()
+        state = "normal" if self.rows and (selection or not self.search_query) else "disabled"
         self.queue_button.configure(state=state)
         self.download_button.configure(state=state)
+        if self.search_query:
+            self.open_button.configure(state="normal" if len(selection) == 1 else "disabled")
 
     def resolve(self, _event=None):
-        parsed = _parse_video_link(self.link.get())
-        if self.busy or self.app.closing or not parsed or parsed[0] != self.source:
+        if self.busy or self.app.closing:
             return "break"
+        value = self.link.get().strip()
+        parsed = _parse_video_link(value)
+        linked = parsed is not None and parsed[0] == self.source
+        if linked or (parsed is None and self._is_search(value)):
+            self._clear_results()
+            if not linked:
+                self.search_query = value
+            self._read(parsed[1] if linked else value)
+        return "break"
+
+    def _scroll_changed(self, first, last):
+        self.scrollbar.set(first, last)
+        if (float(last) >= 0.95 and not self.page_error and self.tree.winfo_viewable()
+                and self.app.active_page == self.source):
+            self._load_next()
+
+    def _load_next(self):
+        if self.busy or self.app.closing or not self.search_query or self.next_offset is None:
+            return
+        self.page_error = False
+        self.retry_button.grid_remove()
+        self._read(self.search_query, offset=self.next_offset)
+
+    def _read(self, value, *, offset=0):
+        search = bool(self.search_query)
         self.serial += 1
         serial = self.serial
+        self.stop.set()
         self.stop = stop = threading.Event()
         self.busy = True
         self.read_button.configure(state="disabled")
-        self.status.set("正在读取 YouTube…")
-        self.rows.clear()
-        self.tree.delete(*self.tree.get_children())
+        self.status.set("正在加载更多视频…" if offset else "正在查找 YouTube…")
         self._update_download_buttons()
 
         def fetch():
-            from youtube_download import resolve_youtube
+            from youtube_download import resolve_youtube, search_youtube
 
             try:
-                result, error = resolve_youtube(parsed[1], stop=stop), ""
+                if search:
+                    result = search_youtube(value, stop=stop, offset=offset)
+                else:
+                    result = resolve_youtube(value, stop=stop)
+                error = ""
             except (OSError, RuntimeError, ValueError) as problem:
                 result, error = None, str(problem)
-            self.app.post("youtube_result", (serial, result, error))
+            if not stop.is_set():
+                self.app.post("youtube_result", (serial, result, error, offset))
 
         threading.Thread(target=fetch, daemon=True).start()
-        return "break"
 
-    def receive(self, serial, result, error):
+    def receive(self, serial, result, error, offset=0):
         if serial != self.serial or self.app.closing:
             return
         self.busy = False
         self.read_button.configure(state="normal")
         if error:
             self.status.set(error)
+            if offset:
+                self.page_error = True
+                self.retry_button.grid()
             return
         self.caption.set(result["title"])
+        previous = len(self.rows)
         for item in result["rows"]:
+            if self.search_query:
+                url = item["url"]
+                if url in self.seen:
+                    continue
+                self.seen.add(url)
             row = self.tree.insert("", "end", values=(item["title"], item.get("artist", "")))
             self.rows[row] = item
-        self.status.set(result.get("warning") or f"{len(self.rows)} 项")
+        cursor = result.get("next_offset")
+        progressed = type(cursor) is int and cursor > offset and len(self.rows) > previous
+        self.next_offset = cursor if self.search_query and progressed else None
+        if len(self.rows) == 1 and not offset:
+            self.tree.selection_set(next(iter(self.rows)))
+        status = f"已显示 {len(self.rows)} 项" if self.rows else "没有找到视频。"
+        self.status.set(result.get("warning") or status)
         self._update_download_buttons()
 
     def _enqueue(self, begin):
-        selected = self.tree.selection() or self.tree.get_children()
+        selected = self.tree.selection()
+        if not selected and not self.search_query:
+            selected = self.tree.get_children()
         if selected:
             self.app.enqueue_tasks((self.rows[row] for row in selected), begin)

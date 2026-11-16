@@ -23,6 +23,7 @@ DEFAULTS = {
     "youtube_mode": "video",
     "bili_danmaku": False,
     "bili_subtitle": False,
+    "bili_archive": False,
     "bili_auto_category": True,
     "mp3_bitrate": 320,
     "region": "au",

@@ -488,6 +488,9 @@ class Studio:
         self.bili_subtitle_box = ttk.Checkbutton(self.bili_options, text="保存字幕（SRT）", variable=self.fields["bili_subtitle"],
                                                command=self.save_preferences, style="Surface.TCheckbutton")
         self.bili_subtitle_box.pack(side="left", padx=10)
+        self.bili_archive_box = ttk.Checkbutton(self.bili_options, text="封面与资料", variable=self.fields["bili_archive"],
+                                              command=self.save_preferences, style="Surface.TCheckbutton")
+        self.bili_archive_box.pack(side="left", padx=(0, 10))
         self.bili_category_box = ttk.Checkbutton(self.bili_options, text="自动分类", variable=self.fields["bili_auto_category"],
                                                 command=self.save_preferences, style="Surface.TCheckbutton")
         self.bili_category_box.pack(side="left")
@@ -698,6 +701,8 @@ class Studio:
                     lines.append("保存弹幕（ASS）")
                 if task.options.get("bili_subtitle"):
                     lines.append("保存字幕（SRT）")
+                if task.options.get("bili_archive"):
+                    lines.append("保存封面与作品资料")
             elif task.source == "youtube":
                 lines.append(YOUTUBE_FORMATS.get(task.options.get("youtube_mode"), YOUTUBE_FORMATS["video"]))
             elif task.source == "local":
@@ -1457,6 +1462,7 @@ class Studio:
         self.youtube_format_box.configure(state="disabled" if busy else "readonly")
         self.bili_danmaku_box.configure(state=state)
         self.bili_subtitle_box.configure(state=state)
+        self.bili_archive_box.configure(state=state)
         self.bili_category_box.configure(state=state)
         self.cancel_button.configure(state="normal" if busy else "disabled")
         if busy:
