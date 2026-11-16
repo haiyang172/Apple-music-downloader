@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+import bili_catalog
 from bili_catalog import SOURCE, VIDEO_BASE, parse_video_link
 from engine import Cancelled
 
@@ -240,10 +241,16 @@ def resolve_collection(value, session=None, stop=None):
                 continue
             owner = item.get("upper") or item.get("owner")
             duration = item.get("duration")
+            video_title = _title(item.get("title"), video_id)
+            partition = _title(item.get("tname")) or _title(item.get("tname_v2"))
+            # List titles describe the whole video. Let the queue resolve the actual part before tagging it.
+            preview = bili_catalog.classify_title(video_title, partition)
             rows.append({
                 "source": SOURCE, "id": video_id, "url": f"{VIDEO_BASE}{video_id}?p=1",
-                "title": _title(item.get("title"), video_id), "artist": "",
+                "title": video_title, "artist": "",
                 "uploader": _title(owner.get("name")) if isinstance(owner, dict) else "",
+                "preview_audio_title": preview["audio_title"], "preview_artist": preview["artist"],
+                "preview_media_category": preview["media_category"], "preview_source_category": partition,
                 "position": position, "duration": duration if type(duration) is int and duration >= 0 else 0,
                 "batch_key": batch_key, "batch_title": batch_title,
             })

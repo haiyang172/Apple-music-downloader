@@ -6,6 +6,7 @@ from tkinter import font, ttk
 
 import bili_catalog
 import bili_collections
+from apple_download import bilibili_category
 from music_browser import TreeSort
 from qr_account_ui import BiliAccountPanel
 from share_links import links_in_text
@@ -79,19 +80,26 @@ class BiliBrowser:
         self.download_button = app.action(toolbar, "下载所选", self.download_selected, primary=True)
         self.download_button.grid(row=0, column=3, padx=(6, 0))
 
-        self.tree = ttk.Treeview(card, columns=("position", "title", "duration"), show="headings",
+        headings = {"position": "分 P", "title": "标题", "artist": "歌手", "category": "分类", "duration": "时长"}
+        self.tree = ttk.Treeview(card, columns=tuple(headings), show="headings",
                                  selectmode="extended", style="Queue.Treeview")
         self.tree.grid(row=1, column=0, sticky="nsew")
         heading_font = font.Font(root=self.tree, family=app.font, size=10, weight="bold")
-        for column, label in (("position", "分 P"), ("title", "标题"), ("duration", "时长")):
-            if column == "title":
-                self.tree.column(column, width=round(250 * app.scale), minwidth=1)
-                self.tree.heading(column, anchor="w")
-            else:
-                width = max(round(64 * app.scale), heading_font.measure(label + "  ▼") + round(20 * app.scale))
-                self.tree.column(column, width=width, minwidth=width, stretch=False, anchor="center")
-        self.sort = TreeSort(self.tree, {"position": "分 P", "title": "标题", "duration": "时长"}, self._sort_value)
-        self.app.bili_format.trace_add("write", self._update_titles)
+        row_font = font.Font(root=self.tree, family=app.font, size=11)
+        self.position_width = max(round(64 * app.scale), heading_font.measure("序号  ▼") + round(20 * app.scale))
+        self.duration_width = max(round(70 * app.scale), row_font.measure("12:59:59") + round(14 * app.scale))
+        for column in headings:
+            aligned_left = column in ("title", "artist", "category")
+            width = {"title": 220, "artist": 92, "category": 101}.get(column, 64)
+            self.tree.column(column, width=round(width * app.scale),
+                             minwidth=1, stretch=False, anchor="w" if aligned_left else "center")
+            self.tree.heading(column, anchor="w" if aligned_left else "center")
+        self.tree.bind("<Configure>", self._fit_columns)
+        self.sort = TreeSort(self.tree, headings, self._sort_value)
+        self._update_audio_view()
+        self.app.bili_format.trace_add("write", self._update_audio_view)
+        for key in ("bili_auto_category", "category"):
+            self.app.fields[key].trace_add("write", self._update_categories)
         self.tree.bind("<<TreeviewSelect>>", self._selection_changed)
         self.tree.bind("<Control-a>", self._select_all)
         self.tree.bind("<Return>", self._queue_from_keyboard)
@@ -190,6 +198,7 @@ class BiliBrowser:
         for item in result["rows"]:
             position = item["position"]
             row = self.tree.insert("", "end", values=(position if collection else f"P{position}", self._display_title(item),
+                                                      self._artist(item), self._category(item),
                                                       _video_duration(item["duration"])))
             self.rows[row] = item
         self.sort.apply()
@@ -198,20 +207,69 @@ class BiliBrowser:
             self.tree.selection_set(next(iter(self.rows)))
 
     def _display_title(self, item):
+        if self.app.bili_format.get() != self.video_format:
+            return self._audio_title(item) or item["title"]
+        return item["title"]
+
+    @staticmethod
+    def _audio_title(item):
         title = item.get("audio_title")
-        if not title or self.app.bili_format.get() == self.video_format:
-            return item["title"]
-        artist = item.get("artist")
-        return f"{title} · {artist}" if artist else title
+        return item.get("preview_audio_title") if title is None else title
+
+    @staticmethod
+    def _artist(item):
+        key = "preview_artist" if item.get("audio_title") is None else "artist"
+        return item.get(key) or ""
+
+    def _category(self, item):
+        direct = self.app.fields["category"].get().strip()
+        if direct or not self.app.fields["bili_auto_category"].get():
+            return direct
+        source = item.get("source_category") or item.get("preview_source_category") or ""
+        media = item.get("media_category") or item.get("preview_media_category") or ""
+        parent = item.get("batch_title", "") if self.result and not self.result.get("collection_kind") else ""
+        return bilibili_category(item["title"], source, media, parent_title=parent)
 
     def _sort_value(self, row, column):
         item = self.rows[row]
-        return self._display_title(item) if column == "title" else item[column]
+        return self.tree.set(row, column) if column in ("title", "artist", "category") else item[column]
 
-    def _update_titles(self, *_):
+    def _update_audio_view(self, *_):
+        audio = self.app.bili_format.get() != self.video_format
+        visible = ("position", "title", "artist", "category", "duration") if audio else ("position", "title", "duration")
+        self.tree.configure(displaycolumns=visible)
+        self._fit_columns()
+        if self.sort.column not in (None, *visible):
+            self.sort.reset()
+            self.tree.set_children("", *sorted(self.rows, key=lambda row: self.rows[row]["position"]))
+        self.sort.set_heading("title", "歌名 / 标题" if audio else "标题")
         for row, item in self.rows.items():
             self.tree.set(row, "title", self._display_title(item))
         self.sort.apply()
+        self._selection_changed()
+
+    def _fit_columns(self, _event=None):
+        available = self.tree.winfo_width() - 2
+        if available < 12:
+            return
+        position = min(self.position_width, available // 6)
+        duration = min(self.duration_width, available // 5)
+        title = available - position - duration
+        widths = {"position": position, "duration": duration}
+        if "artist" in self.tree.cget("displaycolumns"):
+            widths["artist"] = max(1, round(title * 0.25))
+            widths["category"] = max(1, round(title * 0.27))
+            title -= widths["artist"] + widths["category"]
+        widths["title"] = title
+        for column, width in widths.items():
+            if self.tree.column(column, "width") != width:
+                self.tree.column(column, width=width)
+
+    def _update_categories(self, *_):
+        for row, item in self.rows.items():
+            self.tree.set(row, "category", self._category(item))
+        if self.sort.column == "category":
+            self.sort.apply()
 
     def open_parts(self, row=None):
         if self.busy or not self.result or not self.result.get("collection_kind"):
@@ -260,8 +318,8 @@ class BiliBrowser:
         dialog.title("编辑歌名和歌手")
         dialog.transient(app.window)
         dialog.resizable(False, False)
-        song = tk.StringVar(dialog, item.get("audio_title") or item["title"])
-        artist = tk.StringVar(dialog, item.get("artist") or "")
+        song = tk.StringVar(dialog, self._audio_title(item) or item["title"])
+        artist = tk.StringVar(dialog, self._artist(item))
         status = tk.StringVar(dialog)
         card = app.panel(dialog, padding=(round(16 * app.scale), round(13 * app.scale)))
         card.pack(fill="both", expand=True, padx=10, pady=10)
@@ -285,8 +343,12 @@ class BiliBrowser:
                 title_entry.focus_set()
                 return "break"
             if not app.closing and self.rows.get(row) is item:
-                item.update(audio_title=title, artist=artist.get().strip(), song_edited=True)
+                item.update(audio_title=title, artist=artist.get().strip(), media_category="music", song_edited=True)
+                if not item.get("source_category") and item.get("preview_source_category"):
+                    item["source_category"] = item["preview_source_category"]
                 self.tree.set(row, "title", self._display_title(item))
+                self.tree.set(row, "artist", self._artist(item))
+                self.tree.set(row, "category", self._category(item))
                 self.sort.apply()
                 self._selection_changed()
             dialog.destroy()
@@ -318,8 +380,8 @@ class BiliBrowser:
         selection = tuple(row for row in self.tree.selection() if row in self.rows)
         selected = len(selection)
         hint = f"已选 {selected} / {len(self.rows)}" if self.rows else ""
-        if selected == 1 and (title := self.rows[selection[0]].get("audio_title")):
-            artist = self.rows[selection[0]].get("artist")
+        if selected == 1 and self.app.bili_format.get() == self.video_format and (title := self._audio_title(self.rows[selection[0]])):
+            artist = self._artist(self.rows[selection[0]])
             label = f"{artist} - {title}" if artist else title
             hint = f"音频命名 · {label[:28]}{'…' if len(label) > 28 else ''}"
         self.count.set(hint)

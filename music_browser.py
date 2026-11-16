@@ -281,14 +281,23 @@ class MusicBrowser:
         bar = ttk.Frame(page, style="Surface.TFrame")
         bar.grid(row=0, column=0, sticky="ew")
         bar.columnconfigure(0, weight=1)
+        app.label(bar, "Apple Music", large=True, background=app.background).grid(row=0, column=0, sticky="w")
+        tabs = ttk.Frame(bar, style="Surface.TFrame")
+        tabs.grid(row=0, column=1, sticky="e", padx=(round(8 * app.scale), 0))
+        self.browse_tab = ttk.Button(tabs, text="浏览", command=lambda: app.show("music"),
+                                     style="MusicTab.TButton" if private else "MusicTabActive.TButton")
+        self.browse_tab.grid(row=0, column=0)
+        self.library_tab = ttk.Button(tabs, text="资料库", command=lambda: app.show("library"),
+                                      style="MusicTabActive.TButton" if private else "MusicTab.TButton")
+        self.library_tab.grid(row=0, column=1, padx=(round(3 * app.scale), 0))
         self.query = tk.StringVar(page)
         if private:
-            app.label(bar, "Apple Music 资料库", large=True, background=app.background).grid(row=0, column=0, sticky="w")
-            self.connect_button = app.action(bar, "连接资料库", app.connect_library, primary=True)
-            self.connect_button.grid(row=0, column=1, padx=(8, 0))
-            app.action(bar, "刷新", lambda: self.refresh(force=True)).grid(row=0, column=2, padx=(8, 0))
+            actions = ttk.Frame(bar, style="Surface.TFrame")
+            actions.grid(row=1, column=0, columnspan=2, sticky="e", pady=(7, 0))
+            self.connect_button = app.action(actions, "连接资料库", app.connect_library, primary=True)
+            self.connect_button.grid(row=0, column=0)
+            app.action(actions, "刷新", lambda: self.refresh(force=True)).grid(row=0, column=1, padx=(8, 0))
         else:
-            app.label(bar, "Apple Music", large=True, background=app.background).grid(row=0, column=0, sticky="w")
             self.entry = ttk.Entry(bar, textvariable=self.query, style="MusicSearch.TEntry",
                                    font=(app.font, 13))
             self.entry.grid(row=1, column=0, sticky="ew", pady=(7, 0))

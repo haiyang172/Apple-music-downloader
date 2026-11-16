@@ -19,10 +19,15 @@ import winsound
 
 ROOT = Path(__file__).resolve().parent
 APP_TITLE = "影音下载台"
+try:
+    APP_VERSION = (ROOT / "app-version.txt").read_text(encoding="ascii").strip()
+except (OSError, UnicodeError):
+    APP_VERSION = ""
 for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib"):
     if library.is_dir():
         sys.path.insert(0, str(library))
 
+import app_update
 import audio
 from account_ui import VerificationDialog, build_account_page, show_library_connection
 from apple_download import SOURCE, download_options, expand_link, forget_bilibili_cache, read_links, run_tasks, task_category
@@ -62,6 +67,8 @@ TASK_LABELS = {"pending": "待下载", "running": "下载中", "complete": "已�
 PAGES = {"music": "Apple Music", "library": "Apple 资料库", "bilibili": "B 站", "qq": "QQ 音乐", "netease": "网易云音乐",
          "youtube": "YouTube", "douyin": "抖音", "download": "下载队列", "local": "本地转码",
          "account": "账户", "settings": "设置", "components": "组件"}
+PLATFORM_PAGES = ("music", "bilibili", "qq", "netease", "youtube", "douyin")
+TOOL_PAGES = ("download", "local", "settings", "components")
 BG = "#eff5f2"
 PANEL = "#ffffff"
 INK = "#152d32"
@@ -139,6 +146,8 @@ class Studio:
         self.auth_busy = False
         self.pending_region = None
         self.verification = None
+        self.update_in_progress = False
+        self.update_release = None
         try:
             self.preferences = settings.load()
             load_error = ""
@@ -232,6 +241,7 @@ class Studio:
         if self.preferences.get("session"):
             self.library_browser.ensure_loaded()
         self.pump_timer = window.after(80, self.pump)
+        self.update_timer = window.after(1200, self.check_updates) if APP_VERSION else None
         self.start_timer = None
         if self.fields["auto_service"].get() and (
             self.fields["native_account"].get() or self.fields["quality"].get() in ("ALAC", "ATMOS")
@@ -274,9 +284,12 @@ class Studio:
         for widget in (self.nav_canvas, self.nav_content):
             widget.bind("<MouseWheel>", self._scroll_nav)
 
-        primary_pages = [(key, label) for key, label in PAGES.items() if key != "account"]
-        for row, (key, label) in enumerate(primary_pages):
-            button = ttk.Button(self.nav_content, text=label, command=lambda page=key: self.show(page),
+        self.nav_separator = tk.Frame(self.nav_content, background=BORDER, takefocus=False)
+        self.nav_separator.grid(row=len(PLATFORM_PAGES), column=0, sticky="ew")
+        self.nav_separator.bind("<MouseWheel>", self._scroll_nav)
+        for index, key in enumerate((*PLATFORM_PAGES, *TOOL_PAGES)):
+            row = index if index < len(PLATFORM_PAGES) else index + 1
+            button = ttk.Button(self.nav_content, text=PAGES[key], command=lambda page=key: self.show(page),
                                 style="Nav.TButton", cursor="hand2")
             button.grid(row=row, column=0, sticky="ew")
             button.bind("<MouseWheel>", self._scroll_nav)
@@ -349,9 +362,11 @@ class Studio:
         self.rail.grid_configure(padx=(inset, 0), pady=inset)
         self.brand.grid_configure(padx=inset, pady=(round(13 * scale), round(15 * scale)))
         self.brand_title.pack_configure(padx=(gap, 0))
+        self.nav_separator.configure(height=max(1, round(scale)))
+        self.nav_separator.grid_configure(padx=inset + gap, pady=gap)
         for key, button in self.navigation.items():
-            padding = (gap, inset) if key == "account" else (gap, 0) if key == "download" else round(scale)
-            button.grid_configure(padx=(inset + gap, inset) if key == "library" else inset, pady=padding)
+            padding = (gap, inset) if key == "account" else round(scale)
+            button.grid_configure(padx=inset, pady=padding)
         self.brand_icon, self.profile_icon = (
             self.sidebar_icon(prefix, size, scale)
             for prefix, size in (("amdl", brand_size), ("account", round(23 * scale)))
@@ -1009,6 +1024,61 @@ class Studio:
             row=4, column=0, columnspan=3, sticky="w", pady=(8, 8))
         self.action(card, "保存设置", self.save_preferences, primary=True).grid(row=5, column=0, sticky="w")
 
+        updates = self.card(page, 3)
+        updates.columnconfigure(0, weight=1)
+        self.update_status = tk.StringVar(page, f"版本 {APP_VERSION}" if APP_VERSION else "版本未知")
+        self.label(updates, variable=self.update_status, wrap=385).grid(row=0, column=0, sticky="w")
+        self.update_button = self.action(updates, "检查更新", self.check_updates)
+        self.update_button.grid(row=0, column=1, padx=(9, 0))
+        if not APP_VERSION:
+            self.update_button.state(("disabled",))
+        self.release_button = self.action(updates, "查看新版", self.open_update)
+        self.release_button.grid(row=0, column=2, padx=(7, 0))
+        self.release_button.grid_remove()
+
+    def check_updates(self):
+        if self.update_timer:
+            self.window.after_cancel(self.update_timer)
+            self.update_timer = None
+        if self.closing or self.update_in_progress or not APP_VERSION:
+            return
+        self.update_in_progress = True
+        self.update_button.state(("disabled",))
+        self.update_status.set(f"版本 {APP_VERSION} · 正在检查")
+
+        def check():
+            try:
+                result = app_update.check_update(APP_VERSION)
+            except app_update.UpdateCheckError as error:
+                self.post("update_result", (None, str(error)))
+            else:
+                self.post("update_result", (result, ""))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def receive_update(self, result, error):
+        if self.closing:
+            return
+        self.update_in_progress = False
+        self.update_button.state(("!disabled",))
+        if error:
+            message = error
+        elif result.status == "available":
+            self.update_release = result.url
+            self.release_button.grid()
+            self.navigation["settings"].configure(text="设置 · 有更新")
+            message = f"可查看新版 {result.version}"
+        else:
+            self.update_release = None
+            self.release_button.grid_remove()
+            self.navigation["settings"].configure(text=PAGES["settings"])
+            message = "已是最新版本" if result.status == "current" else "GitHub 暂无正式发行版"
+        self.update_status.set(f"版本 {APP_VERSION} · {message}")
+
+    def open_update(self):
+        if self.update_release:
+            webbrowser.open(self.update_release)
+
     def make_components(self):
         page = self.pages["components"]
         self.header(page, "下载组件", "查看登录服务、下载引擎和 FFmpeg 的状态。")
@@ -1035,10 +1105,11 @@ class Studio:
             self.stop_preview()
         self.active_page = page
         self.pages[page].tkraise()
-        self._reveal_nav(self.navigation[page])
+        nav_page = "music" if page == "library" else page
+        self._reveal_nav(self.navigation[nav_page])
         for key, button in self.navigation.items():
             if key != "account":
-                button.configure(style="NavActive.TButton" if key == page else "Nav.TButton")
+                button.configure(style="NavActive.TButton" if key == nav_page else "Nav.TButton")
         self.update_profile_style()
         if page == "music":
             self.music_browser.ensure_loaded()
@@ -1592,7 +1663,7 @@ class Studio:
             self.login_service.close()
         except (OSError, RuntimeError):
             pass
-        for timer in (self.start_timer, self.pump_timer):
+        for timer in (self.start_timer, self.pump_timer, self.update_timer):
             if timer:
                 self.window.after_cancel(timer)
         if self.drop_cleanup is not None:
@@ -1632,6 +1703,8 @@ class Studio:
                     self._display_task_details(task, task.audio_details or records)
             elif kind == "links_resolved":
                 self.finish_links(*value)
+            elif kind == "update_result":
+                self.receive_update(*value)
             elif kind == "bili_result":
                 self.bili_browser.receive(*value)
             elif kind == "youtube_result":

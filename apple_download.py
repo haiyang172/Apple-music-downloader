@@ -103,13 +103,18 @@ def download_options(preferences):
             "volume": _volume_key(preferences["folder"])}
 
 
+def bilibili_category(title, source_category, media_category, *, parent_title="", infer=True):
+    label = suggest_folder(title, source_category, media_category, parent_title=parent_title) if infer else ""
+    return clean_name(label or ("音乐" if media_category == "music" else source_category or "B 站"), 120)
+
+
 def task_category(task):
     category = task.options["category"]
     if category or task.source != "bilibili" or not task.options.get("bili_auto_category", True):
         return category
-    label = ""
-    if task.options.get("bili_category_rules", 1) == 2:
-        parent = ""
+    infer = task.options.get("bili_category_rules", 1) == 2
+    parent = ""
+    if infer:
         try:
             video_id, _ = parse_video_link(task.url)
             upload = f"bilibili:{video_id}"
@@ -117,10 +122,7 @@ def task_category(task):
                 parent = task.batch_title
         except ValueError:
             pass
-        label = suggest_folder(task.title, task.source_category, task.media_category, parent_title=parent)
-    if not label:
-        label = "音乐" if task.media_category == "music" else task.source_category or "B 站"
-    return clean_name(label, 120)
+    return bilibili_category(task.title, task.source_category, task.media_category, parent_title=parent, infer=infer)
 
 
 def _target(task):

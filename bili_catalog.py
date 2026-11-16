@@ -25,48 +25,68 @@ _MAX_PAGE_METADATA_BYTES = 256 * 1024
 _INVALID_LINK = "请输入 B 站视频链接、b23.tv 短链、BV 号或 av 号。"
 _SITE_SUFFIX = re.compile(r"(?:[_｜| \-]+)(?:哔哩哔哩|bilibili)(?:[_.｜| \-]+bilibili)?$", re.I)
 _BOOK_TITLE = re.compile(r"《\s*([^《》]{1,120}?)\s*》")
-_SONG_FIELDS = r"歌名|曲名|歌曲名(?:称)?|song title"
+_SOFT_TITLE = re.compile(r"【\s*([^【】]{1,120}?)\s*】|\[\s*([^\[\]]{1,120}?)\s*\]|「\s*([^「」]{1,120}?)\s*」")
+_SONG_FIELDS = r"歌名|曲名|歌曲名(?:称|稱)?|song title"
 _SONG_LABEL = re.compile(rf"(?:{_SONG_FIELDS})\s*[:：]\s*", re.I)
-_PERFORMER_ROLES = ("翻唱", "演唱", "演唱者", "主唱", "歌手", "artist", "vocal", "vocals", "原唱")
+_PERFORMER_ROLES = ("翻唱", "演唱", "演唱者", "主唱", "歌手", "演奏", "演奏者",
+                    "artist", "performed by", "vocal", "vocals", "原唱")
 _PERFORMER_FIELDS = "|".join(_PERFORMER_ROLES)
-_OTHER_CREDIT_FIELDS = r"作词|作曲|编曲|混音|字幕|剪辑|封面|上传者?|投稿者?|UP主|转载(?:自)?"
+_OTHER_CREDIT_FIELDS = (r"作[词詞]|填[词詞]|作曲|[编編]曲|[录錄]音|混音|字幕|剪[辑輯]|封面|素材|"
+                        r"上[传傳]者?|投稿者?|UP主|[转轉][载載](?:自)?|[视視][频頻]後期|[视視][频頻]后期|"
+                        r"后期|後期|BGM|composer|lyrics by|written by|arrangement|mixing")
 _CREDIT_FIELDS = rf"{_PERFORMER_FIELDS}|{_OTHER_CREDIT_FIELDS}"
 _CREDIT = re.compile(
-    rf"(?<![A-Za-z])(?P<role>{_CREDIT_FIELDS})\s*[:：]\s*"
-    rf"(?P<name>[^\[\]【】〖〗（）()《》｜|丨，,；;]{{1,80}}?)"
-    rf"(?=\s*(?:$|[\[\]【】〖〗（）()《》｜|丨，,；;]|(?:[/／]\s*)?(?:{_CREDIT_FIELDS}|{_SONG_FIELDS})\s*[:：]))",
+    rf"(?<![A-Za-z])(?P<role>{_CREDIT_FIELDS})[^\S\r\n]*[:：][^\S\r\n]*"
+    rf"(?P<name>[^\r\n\[\]【】〖〗（）()《》「」｜|丨，,；;]{{1,80}}?)"
+    rf"(?=[^\S\r\n]*(?:$|[\r\n\[\]【】〖〗（）()《》「」｜|丨，,；;]|"
+    rf"(?:[/／]\s*)?(?:{_CREDIT_FIELDS}|{_SONG_FIELDS})\s*[:：]))",
     re.I,
 )
 _VIDEO_QUALITY = (r"(?:真[.·\s]*)?(?:4K|8K|720P|1080P|1440P|2160P|4320P)"
                   r"(?:\s*@?\d{2,3}(?:FPS|P|帧))?(?:\s*(?:修复|重制|高清|珍藏)(?:版)?)?|"
                   r"\d{2,3}(?:FPS|帧)|HDR|HD")
-_SONG_TAG = (r"[现現][场場](?:版|[纯純]享(?:版)?)?|[纯純]享(?:版)?|完整版|官方(?:版|MV)|[录錄]音室(?:版)?|清唱(?:版)?|原唱(?:版)?|"
-             r"翻唱(?:版)?|[无無][损損](?:音[质質])?|高音[质質]|超清|歌[词詞]版|动态歌词|字幕版|双语字幕|音[乐樂]|歌曲|"
-             r"HQ|SQ|Hi[ -]?Res|MV(?:版)?|MUSIC VIDEO|lyrics?(?: video)?|cover(?: version)?|live(?: version)?|"
+_SONG_TAG = (r"[现現][场場](?:版|[纯純]享(?:版)?)?|[纯純]享(?:版)?|完整版|官方(?:版|MV)?|[录錄]音室(?:版)?|清唱(?:版)?|原唱(?:版)?|"
+             r"翻唱(?:版)?|[无無][损損](?:音[质質])?|高音[质質]|超清(?:修[复復])?|歌[词詞]版|动态歌词|字幕版|"
+             r"双语字幕|音[乐樂](?:[游遊][戏戲])?|音游|歌曲|"
+             r"(?:原版|正式|官方)\s*MV|official(?: music| lyric)? video|HQ|SQ|Hi[ -]?Res|MV(?:版)?|MUSIC VIDEO|"
+             r"lyrics?(?: video)?|cover(?: version)?|live(?: version)?|[粤粵][语語](?:版)?|[怀懷][旧舊]|[经經]典|"
              rf"{_VIDEO_QUALITY}")
 _TAG_SEPARATOR = r"(?:\s*[/／|｜丨、,，+＋·]\s*|\s+)"
 _TAG_SEQUENCE = rf"(?:{_SONG_TAG})(?:{_TAG_SEPARATOR}(?:{_SONG_TAG}))*"
 _BRACKET_TAG = re.compile(rf"[\[【〖(（]\s*{_TAG_SEQUENCE}\s*[\]】〗)）]", re.I)
 _LEADING_TAG = re.compile(rf"^(?:{_TAG_SEQUENCE})\s*[|｜丨·]\s*", re.I)
-_EDGE_TAG = re.compile(rf"(?:\s*(?:[|｜丨·/]|\s[-–—]\s)\s*|\s+){_TAG_SEQUENCE}\s*$", re.I)
+_EDGE_TAG = re.compile(rf"(?:\s*[|｜丨·/\-–—]\s*|\s+){_TAG_SEQUENCE}\s*$", re.I)
 _ATTACHED_MV = re.compile(r"(?<=[\u3400-\u9fff])MV(?:版)?$", re.I)
 _MUSIC_HINT = re.compile(r"演唱(?![会會])|翻唱|主唱|歌曲|音[乐樂]|原[声聲]|伴奏|主[题題]曲|[纯純]享|[无無][损損](?:音[质質])?|高音[质質]|"
                          r"歌[词詞]版|[录錄]音室(?:版)?|[现現][场場]版|神级现场|"
                          r"(?<![A-Za-z])(?:MV|OST|cover|live|lyrics|music video)(?![A-Za-z])", re.I)
-_COVER_HINT = re.compile(r"翻唱|(?<![A-Za-z])cover(?: version)?(?![A-Za-z])", re.I)
+_COVER_HINT = re.compile(r"翻唱|[弹彈]唱|[弹彈]奏版|改[编編]版|(?<![A-Za-z])cover(?: version)?(?![A-Za-z])", re.I)
 _ENDING_ROLE = re.compile(r"\s*(演唱|原唱|翻唱|主唱)\s*$")
-_NON_MUSIC = re.compile(r"解说|讲解|解析|看懂|读懂|影评|书评|测评|评测|导读|书摘|剧情|预告|片段|观后感|读后感|速看|教程|攻略|花絮|全集|"
-                        r"第\s*[0-9一二三四五六七八九十百]+\s*[章节集部期季]|\breaction\b", re.I)
-_COLLECTION = re.compile(r"合集|全集|串烧|歌单|选集|全收录|[0-9一二三四五六七八九十百]+\s*首|\b(?:medley|playlist|compilation)\b", re.I)
-_WORK_TITLE = re.compile(r"(?:收录于|出自|来自|专辑|电影|电视剧|动画|动漫|游戏|原声带)\s*[:：]?\s*$")
+_NON_MUSIC = re.compile(r"解[说說]|[讲講]解|解析|看懂|[读讀]懂|影[评評]|[书書][评評]|[测測][评評]|[评評][测測]|[导導][读讀]|[书書]摘|"
+                        r"剧情|[预預]告|片段|[观觀]后感|[读讀]后感|速看|教程|攻略|花絮|手元|"
+                        r"[访訪][谈談]|[采採][访訪]|幕[后後]|"
+                        r"鬼畜|[恶惡]搞|第\s*[0-9一二三四五六七八九十百]+\s*[章节集部期季]|\b(?:reaction|parody|gameplay)\b", re.I)
+_COLLECTION = re.compile(r"合集|全集|串[烧燒]|歌[单單]|[选選]集|全收[录錄]|全\s*MV|"
+                        r"[0-9一二三四五六七八九十百]+\s*(?:首|[Pp](?!\w))|"
+                        r"\b(?:medley|playlist|compilation|music mix)\b", re.I)
+_WORK_TITLE = re.compile(r"(?:收[录錄][于於]|出自|[来來]自|[专專][辑輯]|[电電]影|[电電][视視][剧劇]|[动動][画畫]|"
+                         r"动漫|[游遊][戏戲]|原[声聲][带帶]|\bfrom)\s*[:：]?\s*$", re.I)
+_WORK_LABEL = re.compile(r"^(?:[A-Z]\d+|\d+(?:P|首)|[游遊][戏戲]原[声聲]|原[声聲][带帶]|persona\s*[1-5][rgx]?)$|"
+                         r"\b(?:OST|original soundtrack)\b|^(?:多|[一二三四五六七八九十\d]+)[种種][语語]言版$", re.I)
 _PART_LABEL = re.compile(r"^(?:P\s*0*\d+|\d{1,2})\s*[.．、:：｜|丨]\s*(?=\S)", re.I)
-_PART_PLACEHOLDER = re.compile(r"(?:P\s*0*\d+|未命名|视频\s*\d+)", re.I)
+_PART_PLACEHOLDER = re.compile(r"(?:P\s*0*\d+|未命名|正片|[单單]曲|[视視][频頻]\s*\d+|"
+                               r"part\s+(?:\d+|one|two|three|four|five|six))", re.I)
+_PROMOTION = re.compile(r"(?:我的(?:新歌|原[创創]|翻唱)|新歌首[发發]|[专專][辑輯](?:[试試][听聽]|[发發]布)|"
+                        r"音[乐樂]分享|這是我寫的|这是我写的|快[来來][听聽]|\b(?:new song|out now|first cover)\b)", re.I)
 _ARRANGEMENT = re.compile(r"(?:伴奏|人声|纯音乐|消音)(?:\s*[/／、]\s*(?:伴奏|人声|纯音乐|消音))*")
 _ARTIST_SHAPE = re.compile(r"(?:[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3·]{1,12}|[A-Za-z0-9][A-Za-z0-9 .&'’_-]{0,39})")
+_MIXED_ARTIST = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]{1,12}\s+[A-Za-z][A-Za-z .&'’_-]{0,39}|"
+                           r"[A-Za-z][A-Za-z .&'’_-]{0,39}\s*[\u3040-\u30ff\u3400-\u9fff]{1,12}")
 _ARTIST_EXCLUSION = re.compile(r"上线|发布|即将|版本|新版|重制版|预览|试听|视频|原著|原作|小说|电影|动画|动漫|"
                                r"合集|全篇|完整|一口气|有声书|热点|音源|背景|封面|投稿|剪辑|转载|字幕|官方|演唱会|"
-                               r"演唱|翻唱|原唱|神级|同人|一起|分享|高音质|无损|高清|经典|一首|音乐|歌曲|"
-                               r"\b(?:full|movie|trailer|episode|audiobook|official|cover|feat)\b", re.I)
+                               r"演唱|翻唱|原唱|神级|同人|一起|分享|高音质|无损|高清|经典|一首|音乐|歌曲|[语語]言版|"
+                               r"才是|这是|這是|真的|必须听|一定要|听哭|聽哭|好听|好聽|搬运|搬運|UP主|"
+                               r"\b(?:full|movie|trailer|episode|audiobook|official|cover|feat|ost|soundtrack)\b", re.I)
 _DASH = re.compile(r"\s+-+\s+|\s*[–—]+\s*|\s*-+\s*(?=[\u3400-\u9fff])")
 _MUSIC_CATEGORIES = frozenset(("音乐", "音樂", "原创音乐", "翻唱", "演奏", "音乐现场", "音乐综合", "music"))
 _CLOSE_BRACKET = {"[": "]", "【": "】", "〖": "〗", "(": ")", "（": "）"}
@@ -198,7 +218,9 @@ def _extract_video_metadata(html):
     if isinstance(genres, list):
         genres = next((_display_title(value) for value in genres if _display_title(value)), "")
     category = _display_title(genres) or _breadcrumb_category(parser.breadcrumbs)
-    return {"title": title, "uploader": uploader, "source_category": category}
+    description = parser.video.get("description")
+    return {"title": title, "uploader": uploader, "source_category": category,
+            "description": description[:1600] if isinstance(description, str) else ""}
 
 
 def _fetch_video_metadata(video_id):
@@ -230,91 +252,123 @@ def _trim_parts(title):
 
 
 def _artist_name(value):
-    name = _display_title(value).strip(" |｜丨·:/／,，;；-–—")
+    name = _display_title(value).strip(" @＠|｜丨·:/／,，;；-–—")
     if _ARTIST_EXCLUSION.search(name) or re.fullmatch(_TAG_SEQUENCE, name, re.I) or name.isdecimal():
         return ""
     names = re.split(r"\s*[/／&＆+＋×、]\s*", name)
-    return name if all(_ARTIST_SHAPE.fullmatch(item) for item in names) else ""
+    return name if all(_ARTIST_SHAPE.fullmatch(item) or _MIXED_ARTIST.fullmatch(item) for item in names) else ""
 
 
 def _nearby_artist(text, is_cover):
+    text = text.strip(" |｜丨·:/／,，;；-–—")
     role = _ENDING_ROLE.search(text)
     if role and (not is_cover or role[1] != "原唱"):
         return _artist_name(text[:role.start()])
     return "" if is_cover else _artist_name(text)
 
 
-def _title_book_matches(text):
+def _title_matches(text, pattern):
     matches = []
     previous = 0
-    for match in _BOOK_TITLE.finditer(text):
+    for match in pattern.finditer(text):
         lead = text[previous:match.start()]
-        if not _WORK_TITLE.search(lead) and not _ARRANGEMENT.fullmatch(match[1]):
-            matches.append(match)
+        track = next(value for value in match.groups() if value is not None)
+        after = text[match.end():]
+        is_work = _WORK_TITLE.search(lead) or re.match(r"\s*(?:原声带|原聲帶|专辑|專輯|OST\b)", after, re.I)
+        if not is_work and not (_ARRANGEMENT.fullmatch(track) or _WORK_LABEL.search(track)
+                                or _COLLECTION.search(track) or _NON_MUSIC.search(track)):
+            matches.append((match, track))
         previous = match.end()
     return matches
 
 
-def _song_metadata(title, source_category=""):
+def _performer(credits, is_cover):
+    for role in _PERFORMER_ROLES:
+        if role == "原唱" and is_cover:
+            continue
+        artists = dict.fromkeys(name for credit in credits if credit["role"].casefold() == role
+                                and (name := _artist_name(credit["name"])))
+        if artists:
+            return next(iter(artists)) if len(artists) == 1 else ""
+    return ""
+
+
+def _is_non_music(text):
+    return bool(_NON_MUSIC.search(text) or _FOLDER_NON_MUSIC.search(text))
+
+
+def _track_name(value):
+    track = _trim_parts(value)
+    if (not track or _ARRANGEMENT.fullmatch(track) or _PART_PLACEHOLDER.fullmatch(track)
+            or re.fullmatch(_TAG_SEQUENCE, track, re.I)):
+        return ""
+    return track
+
+
+def _song_metadata(title, source_category="", *, part=False, description=""):
     """Recognize song-title patterns while leaving ordinary video titles untouched."""
     original = _display_title(title)
-    music_category = source_category.casefold() in _MUSIC_CATEGORIES
-    fields = {item["role"].casefold(): _artist_name(item["name"]) for item in _CREDIT.finditer(original)}
-    is_cover = _COVER_HINT.search(original) is not None
-    artist = next((fields[role] for role in _PERFORMER_ROLES
-                   if fields.get(role) and (role != "原唱" or not is_cover)), "")
+    music_category = _display_title(source_category).casefold() in _MUSIC_CATEGORIES
+    credits = tuple(_CREDIT.finditer(original))
+    description_credits = tuple(_CREDIT.finditer(description[:1600]))
+    is_cover = bool(_COVER_HINT.search(original) or
+                    any(credit["role"].casefold() == "翻唱" for credit in description_credits))
+    artist = _performer(credits, is_cover) or _performer(description_credits, is_cover)
     without_credits = _CREDIT.sub("", original)
-    without_credits = re.sub(r"\[\s*\]|【\s*】|〖\s*〗|\(\s*\)|（\s*）", " ", without_credits)
+    without_credits = re.sub(r"\[\s*\]|【\s*】|〖\s*〗|\(\s*\)|（\s*）|「\s*」", " ", without_credits)
     candidate = _trim_parts(without_credits)
-    if music_category:
+    if part or music_category:
         candidate = _PART_LABEL.sub("", candidate)
     has_music_hint = _MUSIC_HINT.search(original) is not None
     labelled = _SONG_LABEL.search(candidate)
     if labelled:
         lead = candidate[:labelled.start()].rstrip()
-        if _NON_MUSIC.search(lead):
+        if _is_non_music(lead) or _COLLECTION.search(lead):
             return "", ""
         candidate = _trim_parts(candidate[labelled.end():])
         if closing := _CLOSE_BRACKET.get(lead[-1:]):
             candidate = candidate.partition(closing)[0]
-        books = _title_book_matches(candidate)
-        if len(books) > 1:
+        matches = _title_matches(candidate, _BOOK_TITLE) or _title_matches(candidate, _SOFT_TITLE)
+        if len(matches) > 1:
             return "", ""
-        if books and books[0].start() == 0:
-            return books[0][1], artist
-        track = _trim_parts(re.split(r"[|｜丨；;]", candidate, maxsplit=1)[0])
+        if matches and matches[0][0].start() == 0:
+            return _track_name(matches[0][1]), artist
+        segment = re.split(r"[|｜丨；;]", candidate, maxsplit=1)[0]
+        track = "" if _is_non_music(segment) or _COLLECTION.search(segment) else _track_name(segment)
         return track, artist if track else ""
 
-    books = _title_book_matches(candidate)
-    if len(books) == 1:
-        title_match, = books
+    matches = _title_matches(candidate, _BOOK_TITLE)
+    if not matches and not _BOOK_TITLE.search(candidate) and (music_category or has_music_hint or artist):
+        matches = _title_matches(candidate, _SOFT_TITLE)
+    if len(matches) == 1:
+        (title_match, track), = matches
         before, after = candidate[:title_match.start()].strip(), candidate[title_match.end():].strip()
         context = f"{before} {after}"
-        if _NON_MUSIC.search(context) or _COLLECTION.search(context):
+        if _is_non_music(context) or _COLLECTION.search(context):
             return "", ""
-        leading_artist = _nearby_artist(before, is_cover)
+        artist_lead = re.split(r"\s+[–—-]\s+|[|｜丨·]", before.strip(" |｜丨·-/–—"))[-1]
+        leading_artist = _nearby_artist(artist_lead, is_cover) if len(artist_lead) <= 55 else ""
         trailing_artist = _nearby_artist(after, is_cover) if re.match(r"^[-–—|｜丨·]", after) else ""
-        if not artist and (music_category or has_music_hint or not source_category and candidate != original):
+        if not artist and (music_category or has_music_hint or not source_category):
             artist = leading_artist or trailing_artist
-        plain_book_title = (not source_category and not fields
-                            and (bool(leading_artist or trailing_artist) or not before and not after))
-        if artist or has_music_hint or music_category or plain_book_title:
-            return title_match[1], artist
+        if artist or has_music_hint or music_category:
+            return _track_name(track), artist
         return "", ""
-    if (books or _NON_MUSIC.search(candidate) or _COLLECTION.search(candidate)
+    if (matches or _is_non_music(candidate) or _COLLECTION.search(candidate)
             or not (music_category or has_music_hint or artist)):
         return "", ""
 
-    if _BOOK_TITLE.search(candidate):
-        candidate = _trim_parts(_BOOK_TITLE.sub("", candidate))
+    if _BOOK_TITLE.search(candidate) or _SOFT_TITLE.search(candidate):
+        return "", ""
     parts = _DASH.split(candidate, maxsplit=1)
     if len(parts) == 2 and (leading_artist := _artist_name(parts[0])):
-        track = _trim_parts(parts[1])
-        if track and not _ARRANGEMENT.fullmatch(track):
+        if track := _track_name(parts[1]):
             return track, artist or ("" if is_cover else leading_artist)
-    if (candidate and (candidate != original or artist) and not _ARRANGEMENT.fullmatch(candidate)
-            and not _PART_PLACEHOLDER.fullmatch(candidate)):
-        return candidate, artist
+    if _PROMOTION.search(candidate):
+        return "", ""
+    if (candidate != original or artist or (part and music_category and len(candidate) <= 100)):
+        if track := _track_name(candidate):
+            return track, artist
     return "", ""
 
 
@@ -323,14 +377,19 @@ def clean_song_title(title):
 
 
 def _media_category(source_category, title, audio_title):
-    if source_category.casefold() in _MUSIC_CATEGORIES:
+    if audio_title or (_display_title(source_category).casefold() in _MUSIC_CATEGORIES and not _is_non_music(title)):
         return "music"
-    if audio_title and (_SONG_LABEL.search(title) or _MUSIC_HINT.search(title)
-                        or any(credit["role"].casefold() in _PERFORMER_ROLES for credit in _CREDIT.finditer(title))):
-        return "music"
-    if source_category or _NON_MUSIC.search(title):
+    if source_category or _is_non_music(title):
         return "video"
     return ""
+
+
+def classify_title(title, source_category="", *, part=False):
+    """Return provisional metadata available from a Bilibili title alone."""
+    title = _display_title(title)
+    audio_title, artist = _song_metadata(title, source_category, part=part)
+    return {"audio_title": audio_title or None, "artist": artist if audio_title else "",
+            "media_category": _media_category(source_category, title, audio_title)}
 
 
 def suggest_folder(title, source_category, media_category, *, parent_title=""):
@@ -503,6 +562,8 @@ def resolve_video(value, *, metadata=True, session=None):
     video_title = info.get("title", "")
     uploader = info.get("uploader", "")
     source_category = info.get("source_category", "")
+    description = info.get("description", "")
+    multipart = len(parts) > 1
 
     rows = {}
     for item in parts:
@@ -513,14 +574,27 @@ def resolve_video(value, *, metadata=True, session=None):
                 or position in rows or type(cid) is not int or cid <= 0):
             raise BilibiliCatalogError("B 站返回的视频分 P 信息无效。")
         part_title = _display_title(item.get("part"))
-        title = (video_title if len(parts) == 1 else "") or part_title or f"P{position}"
-        song_source = title
-        audio_title, artist = _song_metadata(title, source_category) if metadata else ("", "")
-        if metadata and not audio_title and part_title and title != part_title:
-            song_source = part_title
-            audio_title, artist = _song_metadata(part_title, source_category)
-        media_category = _media_category(source_category, song_source, audio_title) if metadata else ""
         duration = item.get("duration")
+        title = (video_title if not multipart else "") or part_title or f"P{position}"
+        song_source = title
+        audio_title = artist = media_category = ""
+        if metadata:
+            matching_part = (video_title == part_title and bool(part_title)
+                             and type(duration) is int and 45 <= duration <= 720)
+            can_use_plain_title = multipart or matching_part
+            audio_title, artist = _song_metadata(title, source_category, part=can_use_plain_title)
+            if (not audio_title and part_title and title != part_title
+                    and not _is_non_music(title) and not _COLLECTION.search(title)):
+                song_source = part_title
+                audio_title, artist = _song_metadata(part_title, source_category)
+            if audio_title and description and not multipart:
+                audio_title, artist = _song_metadata(song_source, source_category, part=can_use_plain_title,
+                                                     description=description)
+            if not audio_title:
+                artist = ""
+                if not info:
+                    audio_title = None
+            media_category = _media_category(source_category, song_source, audio_title)
         rows[position] = {
             "source": SOURCE,
             "url": f"{VIDEO_BASE}{video_id}?p={position}",
@@ -545,6 +619,6 @@ def resolve_video(value, *, metadata=True, session=None):
         "title": title,
         "uploader": uploader,
         "source_category": source_category,
-        "media_category": _media_category(source_category, title, clean_song_title(title)) if metadata else "",
+        "media_category": classify_title(title, source_category)["media_category"] if metadata else "",
         "rows": [dict(rows[position], batch_title=title) for position in positions],
     }

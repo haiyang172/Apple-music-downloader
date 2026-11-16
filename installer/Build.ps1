@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.3.27',
+    [string]$Version,
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,
@@ -14,6 +14,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $studio = Split-Path -Parent $PSScriptRoot
 $workspace = Split-Path -Parent $studio
+if (-not $Version) { $Version = (Get-Content -LiteralPath (Join-Path $studio 'app-version.txt') -Raw).Trim() }
+if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw 'Invalid application version.' }
 if (-not $PythonLib) { $PythonLib = Join-Path $workspace 'playlist-download\python-deps' }
 if (-not $AudioTools) { $AudioTools = Join-Path $workspace 'wsl1\deps-win' }
 $distribution = Join-Path (Join-Path $PSScriptRoot 'dist') $Version
@@ -170,7 +172,7 @@ function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
     }
 }
 
-$sources = @('Studio.py', 'apple_download.py', 'download_queue.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py', 'library_cache.py',
+$sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'download_queue.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py', 'library_cache.py',
     'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py',
     'bili_auth.py', 'qr_account_ui.py', 'bili_catalog.py', 'bili_collections.py', 'bili_download.py', 'bili_resume.py',
     'bili_sidecars.py', 'bili_ui.py',
@@ -189,6 +191,7 @@ $stage = Join-Path $PSScriptRoot ('.stage-' + [Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($stage)
 try {
     foreach ($file in $sources) { Copy-Item -LiteralPath (Join-Path $studio $file) -Destination $stage }
+    Set-Content -LiteralPath (Join-Path $stage 'app-version.txt') -Value $Version -Encoding ASCII
     foreach ($file in @('README.md', 'THIRD_PARTY.md', 'LICENSE', 'LICENSE.txt')) {
         $source = Join-Path $studio $file
         if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $stage }
@@ -261,15 +264,21 @@ try {
     }
 
     $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    $application = Join-Path $stage 'amdl.exe'
+    $application = Join-Path $stage 'MediaDownloadDesk.exe'
     $launcher = Join-Path $PSScriptRoot 'Launcher.cs'
     $manifest = Join-Path $PSScriptRoot 'Launcher.manifest'
+    $versionSource = Join-Path $stage 'AssemblyVersion.cs'
+    Set-Content -LiteralPath $versionSource -Encoding ASCII -Value @(
+        ('[assembly: System.Reflection.AssemblyFileVersion("{0}")]' -f $Version),
+        ('[assembly: System.Reflection.AssemblyInformationalVersion("{0}")]' -f $Version)
+    )
     $compile = @('/nologo', '/codepage:65001', '/target:winexe', '/optimize+', '/reference:System.Windows.Forms.dll',
-        "/out:$application", "/win32manifest:$manifest", $launcher)
+        "/out:$application", "/win32manifest:$manifest", $launcher, $versionSource)
     $icon = Join-Path $stage 'assets\AMDLStudio.ico'
     if (Test-Path -LiteralPath $icon -PathType Leaf) { $compile += "/win32icon:$icon" }
     & $compiler @compile
     if ($LASTEXITCODE -ne 0) { throw 'The Media Download Desk launcher could not be compiled.' }
+    Remove-Item -LiteralPath $versionSource
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Portable.cmd') -Destination (Join-Path $stage 'Run.cmd')
 
     & $InnoCompiler /Qp "/O$distribution" "/DAppVersion=$Version" "/DPayloadDir=$stage" (Join-Path $PSScriptRoot 'Setup.iss')
@@ -285,7 +294,7 @@ try {
     }
     Move-Item -LiteralPath $stage -Destination $portable
     Write-Output "Installer: $setup"
-    Write-Output "Portable:  $(Join-Path $portable 'amdl.exe')"
+    Write-Output "Portable:  $(Join-Path $portable 'MediaDownloadDesk.exe')"
 }
 finally {
     if (Test-Path -LiteralPath $stage -PathType Container) {

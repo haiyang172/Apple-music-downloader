@@ -1,11 +1,12 @@
 ﻿#ifndef AppVersion
-  #define AppVersion "0.3.27"
+  #define AppVersion "0.3.28"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "dist\amdl"
 #endif
 #define StudioAppId "amdl.desktop"
 #define StudioAppName "影音下载台"
+#define StudioExecutable "MediaDownloadDesk.exe"
 
 [Setup]
 AppId={{74870839-527C-4C3D-A869-AB8A60913829}
@@ -15,7 +16,7 @@ DefaultDirName={localappdata}\Programs\amdl
 DefaultGroupName={#StudioAppName}
 DisableProgramGroupPage=yes
 DisableStartupPrompt=yes
-UninstallDisplayIcon={app}\amdl.exe
+UninstallDisplayIcon={app}\{#StudioExecutable}
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
@@ -55,11 +56,11 @@ Type: files; Name: "{autodesktop}\AMDL Studio.lnk"; Check: not IsExtractMode
 Type: files; Name: "{app}\AMDLStudio.exe"; Check: not IsExtractMode
 
 [Icons]
-Name: "{autoprograms}\{#StudioAppName}"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Check: not IsExtractMode
-Name: "{autodesktop}\{#StudioAppName}"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon; Check: not IsExtractMode
+Name: "{autoprograms}\{#StudioAppName}"; Filename: "{app}\{#StudioExecutable}"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Check: not IsExtractMode
+Name: "{autodesktop}\{#StudioAppName}"; Filename: "{app}\{#StudioExecutable}"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon; Check: not IsExtractMode
 
 [Run]
-Filename: "{app}\amdl.exe"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsExtractMode
+Filename: "{app}\{#StudioExecutable}"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsExtractMode
 
 [CustomMessages]
 zhcn.DesktopIcon=创建桌面快捷方式

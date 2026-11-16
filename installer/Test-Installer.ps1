@@ -68,12 +68,18 @@ try {
     if (Compare-Object $before @(Get-InstallState)) {
         throw 'Setup extraction unexpectedly changed an existing registration or shortcut.'
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $target 'amdl.exe') -PathType Leaf) -or
+    if (-not (Test-Path -LiteralPath (Join-Path $target 'MediaDownloadDesk.exe') -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $target 'amdl.exe')) -or
         (Get-ChildItem -LiteralPath $target -Filter 'unins*')) {
         throw 'Setup did not produce a standalone, unregistered application directory.'
     }
-    $launcher = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $target 'amdl.exe'))
+    $launcher = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $target 'MediaDownloadDesk.exe'))
     if ($launcher.ProductName -cne '影音下载台') { throw 'Setup did not contain the branded launcher.' }
+    $installedVersion = (Get-Content -LiteralPath (Join-Path $target 'app-version.txt') -Raw).Trim()
+    if ($installedVersion -cne $launcher.ProductVersion) { throw 'Setup did not stamp the launcher with its update version.' }
+    if ((Get-Content -LiteralPath (Join-Path $target 'Run.cmd') -Raw) -notmatch 'MediaDownloadDesk\.exe') {
+        throw 'The portable launcher still references the old executable.'
+    }
 
     foreach ($name in $environment.Keys) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -97,6 +103,7 @@ profile = Path(os.environ["LOCALAPPDATA"])
 sys.path.insert(0, str(root))
 
 import Studio
+import app_update
 import login_service
 import mutagen
 import settings
@@ -197,12 +204,40 @@ def wait_for(window, condition):
 
 
 Studio.configure_windows()
-window, app = new_window()
+release_url = "https://github.com/haiyang172/Apple-music-downloader/releases/tag/v999.0.0"
+with patch.object(app_update, "check_update", return_value=app_update.UpdateCheck("available", "999.0.0", release_url)) as check:
+    window, app = new_window()
+    wait_for(window, lambda: app.update_release == release_url)
+    check.assert_called_once_with(Studio.APP_VERSION)
 try:
     assert window.title() == Studio.APP_TITLE
+    assert Studio.APP_VERSION and Studio.APP_VERSION == (root / "app-version.txt").read_text(encoding="ascii").strip()
+    assert app.navigation["settings"].cget("text") == "设置 · 有更新"
+    with patch.object(Studio.webbrowser, "open") as open_release:
+        app.release_button.invoke()
+        open_release.assert_called_once_with(release_url)
+    with patch.object(app_update, "check_update", return_value=app_update.UpdateCheck("current")):
+        app.update_button.invoke()
+        wait_for(window, lambda: not app.update_in_progress)
+    assert app.update_release is None and "已是最新版本" in app.update_status.get()
     assert app.profile_text.get() == "登录" and app.brand_icon.width() >= 32
     assert app.profile_button.master == app.rail and app.navigation["components"].master == app.nav_content
     assert int(app.profile_button.grid_info()["row"]) > int(app.nav_canvas.master.grid_info()["row"])
+    platforms = ("music", "bilibili", "qq", "netease", "youtube", "douyin")
+    assert tuple(app.navigation)[:6] == platforms
+    assert [app.navigation[key].cget("text") for key in platforms] == [
+        "Apple Music", "B 站", "QQ 音乐", "网易云音乐", "YouTube", "抖音",
+    ]
+    assert int(app.navigation["douyin"].grid_info()["row"]) < int(app.nav_separator.grid_info()["row"])
+    assert int(app.nav_separator.grid_info()["row"]) < int(app.navigation["download"].grid_info()["row"])
+    for source in platforms:
+        app.navigation[source].invoke()
+        assert app.active_page == source and app.navigation[source].cget("style") == "NavActive.TButton"
+    app.navigation["music"].invoke()
+    app.music_browser.library_tab.invoke()
+    assert app.active_page == "library" and app.navigation["music"].cget("style") == "NavActive.TButton"
+    app.library_browser.browse_tab.invoke()
+    assert app.active_page == "music"
     app.profile_button.invoke()
     assert app.active_page == "account"
     app.show("music")
@@ -594,6 +629,18 @@ original_subtitle = apple_download.save_subtitle
 original_cover = apple_download.save_cover
 session = BiliSession((("SESSDATA", "fixture-account-session"),))
 parts_calls = []
+assert bili_catalog.classify_title("周杰倫 Jay Chou【夜曲 Nocturne】-Official", "音乐") == {
+    "audio_title": "夜曲 Nocturne", "artist": "周杰倫 Jay Chou", "media_category": "music",
+}
+assert bili_catalog.classify_title("夜曲", "音乐", part=True)["audio_title"] == "夜曲"
+assert bili_catalog.classify_title("《三体》解说", "音乐") == {
+    "audio_title": None, "artist": "", "media_category": "video",
+}
+assert bili_catalog.classify_title("《女神异闻录5》原声 · 歌名：《Life Will Change》｜演唱：Lyn", "音乐") == {
+    "audio_title": "Life Will Change", "artist": "Lyn", "media_category": "music",
+}
+assert bili_catalog.classify_title("《富士山下》六种语言翻唱｜原唱：陈奕迅", "音乐")["artist"] == ""
+assert bili_catalog.suggest_folder("Persona 5 OST全集", "游戏", "music") == "Persona 系列"
 
 
 def fixture_parts(video_id, sess=None):
@@ -667,9 +714,27 @@ try:
     assert browser.caption.get() == "公开演出合集"
     assert browser.metadata.get() == "投稿者测试  ·  音乐"
     track_row = browser.tree.get_children()[1]
-    assert browser.tree.set(track_row, "title") == "夜曲 · 周杰伦"
+    assert browser.tree.set(track_row, "title") == "夜曲" and browser.tree.set(track_row, "artist") == "周杰伦"
+    assert tuple(browser.tree.cget("displaycolumns")) == ("position", "title", "artist", "category", "duration")
+    assert browser.tree.set(track_row, "category") == "音乐"
+    width, height = window.minsize()
+    window.geometry(f"{width}x{height}")
+    window.attributes("-alpha", 0.0)
+    window.deiconify()
+    window.update()
+    assert all(app.navigation[page].winfo_viewable() for page in Studio.PLATFORM_PAGES)
+    x, _, duration_width, _ = browser.tree.bbox(track_row, "duration")
+    assert x + duration_width <= browser.tree.winfo_width()
+    window.withdraw()
+    app.fields["category"].set("车载")
+    assert browser.tree.set(track_row, "category") == "车载"
+    app.fields["category"].set("")
+    app.fields["bili_auto_category"].set(False)
+    assert not browser.tree.set(track_row, "category")
+    app.fields["bili_auto_category"].set(True)
     app.bili_format.set(Studio.BILI_FORMATS["video"])
     assert "《夜曲》" in browser.tree.set(track_row, "title")
+    assert tuple(browser.tree.cget("displaycolumns")) == ("position", "title", "duration")
     app.bili_format.set(Studio.BILI_FORMATS["audio"])
     assert bili_catalog.clean_song_title("《三体》解说") == ""
     browser.tree.selection_set(track_row)
@@ -726,7 +791,8 @@ try:
 
     collection = "https://space.bilibili.com/517327498/lists/3993361?type=season"
     collection_result = {"title": "测试合集", "collection_kind": "season", "rows": [
-        {"source": "bilibili", "title": "测试视频", "url": "https://www.bilibili.com/video/BV1GJ411x7h7?p=1",
+        {"source": "bilibili", "title": "Persona 5 OST · 《Life Will Change》", "url": "https://www.bilibili.com/video/BV1GJ411x7h7?p=1",
+         "preview_audio_title": "Life Will Change", "preview_artist": "Lyn", "preview_media_category": "music",
          "position": 4, "total": 12, "duration": 35, "batch_key": "bilibili:collection:3993361", "batch_title": "测试合集"},
     ]}
     with patch.object(bili_collections, "resolve_collection", return_value=collection_result):
@@ -734,6 +800,8 @@ try:
         wait_for(window, lambda: len(browser.rows) == 1 and not browser.busy)
     row, = browser.tree.get_children()
     assert browser.tree.item(row, "values")[0] in (4, "4")
+    assert browser.tree.set(row, "title") == "Life Will Change"
+    assert browser.tree.set(row, "artist") == "Lyn" and browser.tree.set(row, "category") == "Persona 系列"
     browser.open_parts()
     wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
     assert browser.back_button.winfo_manager() and "/video/" in browser.link.get()
@@ -742,6 +810,7 @@ try:
     browser.queue_all()
     collection_task, = [item for item in app.tasks.values() if item.batch_title == "测试合集"]
     assert (collection_task.position, collection_task.total) == (4, 12) and collection_task.url.endswith("?p=1")
+    assert collection_task.audio_title is None and not collection_task.artist
 
     browser.open_parts()
     wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
@@ -761,7 +830,7 @@ try:
     buttons = {w.cget("text"): w for w in all_children(dialog) if w.winfo_class() == "TButton"}
     buttons["互换"].invoke()
     buttons["应用"].invoke()
-    assert browser.tree.set(edition_row, "title") == "测试歌曲 · 测试歌手"
+    assert browser.tree.set(edition_row, "title") == "测试歌曲" and browser.tree.set(edition_row, "artist") == "测试歌手"
     assert browser.rows[edition_row]["title"] == original_title
     browser.queue_selected()
     edited, = [item for item in app.tasks.values() if item.source == "bilibili" and item.song_edited]

@@ -198,6 +198,11 @@ def install(style, window, scale, *, bg, panel, ink, muted, accent, border,
         button(name, fill, None, foreground, blend(panel, accent, 0.10), blend(panel, accent, 0.17),
                panel, accent, padding=(round(10 * scale), round(4 * scale)), backdrop=panel)
 
+    for name, fill, foreground in (("MusicTab.TButton", bg, muted),
+                                   ("MusicTabActive.TButton", selected, accent)):
+        button(name, fill, None, foreground, blend(bg, accent, 0.10), blend(bg, accent, 0.17),
+               bg, accent, padding=(round(11 * scale), round(5 * scale)))
+
     for name, fill, foreground in (
         ("Nav.TButton", nav, muted),
         ("NavActive.TButton", nav_active, accent),
