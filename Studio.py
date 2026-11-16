@@ -1,48 +1,72 @@
-"""amdl desktop application."""
+"""Media Download Desk desktop application."""
 
 import ctypes
+import hashlib
+import msvcrt
 import os
 from pathlib import Path
 import queue
 import re
+import sqlite3
 import sys
 import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, ttk
-from urllib.parse import parse_qs, urlsplit
 import webbrowser
 import winsound
 
 
 ROOT = Path(__file__).resolve().parent
-APP_TITLE = "amdl"
+APP_TITLE = "影音下载台"
 for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib"):
     if library.is_dir():
         sys.path.insert(0, str(library))
 
 import audio
 from account_ui import VerificationDialog, build_account_page
-from engine import Cancelled, Engine
+from apple_download import SOURCE, download_options, expand_link, forget_bilibili_cache, read_links, run_tasks, task_category
+from bili_auth import BiliAuth
+from bili_catalog import is_video_link, resolve_video
+from bili_collections import is_collection_link, resolve_collection
+from bili_ui import BiliBrowser
+from download_queue import QueueStore
+from engine import Engine
+from library_cache import LibraryCache
+from local_convert_ui import FORMATS as LOCAL_FORMATS, LocalConverter
 from login_service import LoginService
 from music_browser import MusicBrowser, TreeSort, prepare_preview
 from music_catalog import CatalogClient
-from round_theme import install as install_round_theme
+from netease_auth import NeteaseAuth
+from playlist_export import save_m3u8
+from qq_auth import QqAuth
+from round_theme import install as install_round_theme, sidebar_badge
 import settings
-from storage import destination_for, publish, volume_identity
+from shared_music import shared_music_source
+from shared_music_ui import SharedMusicBrowser
+from storage import clean_name, destination_for
+from video_links_ui import VideoLinkPage, video_link_source
+from windows_drop import install_drop_target
 
 
 QUALITY = {"AAC": "AAC-LC · 兼容", "ALAC": "ALAC · 无损", "ATMOS": "Dolby Atmos"}
-PAGES = {"music": "音乐", "library": "资料库", "download": "下载队列",
+BILI_FORMATS = {"video": "视频 · MP4", "audio": "音频 · M4A", "flac": "音频 · 原始 FLAC", "mp3": "音频 · MP3"}
+YOUTUBE_FORMATS = {"video": "视频 · MP4", "audio": "音频 · M4A", "mp3": "音频 · MP3"}
+QUEUE_SOURCES = {"all": "全部来源", SOURCE: "Apple Music", "bilibili": "哔哩哔哩", "qq": "QQ 音乐", "netease": "网易云音乐",
+                 "youtube": "YouTube", "local": "本地转码"}
+TASK_LABELS = {"pending": "待下载", "running": "下载中", "complete": "已完成",
+               "failed": "失败", "interrupted": "待继续", "cancelled": "已取消"}
+PAGES = {"music": "Apple Music", "library": "Apple 资料库", "bilibili": "B 站", "qq": "QQ 音乐", "netease": "网易云音乐",
+         "youtube": "YouTube", "douyin": "抖音", "download": "下载队列", "local": "本地转码",
          "account": "账户", "settings": "设置", "components": "组件"}
 BG = "#eff5f2"
 PANEL = "#ffffff"
 INK = "#152d32"
 MUTED = "#405d60"
-NAV = "#102b31"
-NAV_ACTIVE = "#24524f"
-NAV_ACCOUNT = "#1b3b40"
-NAV_SIGNED_IN = "#a3f6dc"
+NAV = "#f8fcfa"
+NAV_ACTIVE = "#dcefe6"
+NAV_ACCOUNT = "#edf6f1"
+NAV_SIGNED_IN = "#08664f"
 ACCENT = "#11715e"
 BORDER = "#cdded6"
 
@@ -57,7 +81,7 @@ def find_backend():
     for folder in backend_locations():
         if (folder / bridge).is_file() and (folder / "tools/ffmpeg.exe").is_file():
             return folder
-    raise RuntimeError("找不到下载引擎或 FFmpeg。请运行 amdl 安装包。")
+    raise RuntimeError("找不到下载引擎或 FFmpeg。请运行影音下载台安装包。")
 
 
 def configure_windows():
@@ -80,118 +104,6 @@ def configure_windows():
         pass
 
 
-def read_links(text):
-    result = []
-    for row, raw in enumerate(text.splitlines(), 1):
-        link = raw.strip()
-        if not link:
-            continue
-        try:
-            parsed = urlsplit(link)
-            parts = parsed.path.strip("/").split("/")
-            if parts and re.fullmatch(r"[a-z]{2}", parts[0], re.I):
-                parts = parts[1:]
-            valid = (
-                parsed.scheme == "https" and parsed.netloc.lower() == "music.apple.com"
-                and len(parts) > 1 and parts[0] in ("song", "album", "playlist")
-                and not any(char.isspace() or ord(char) < 32 for char in link)
-            )
-            if not valid:
-                raise ValueError()
-            track = parse_qs(parsed.query, keep_blank_values=True).get("i")
-            if parts[0] == "album" and track:
-                if len(track) != 1 or not re.fullmatch(r"[0-9]+", track[0]):
-                    raise ValueError()
-                parsed = parsed._replace(query=f"i={track[0]}")
-            result.append(parsed._replace(fragment="").geturl())
-        except ValueError:
-            raise ValueError(f"第 {row} 行不是有效的 Apple Music 歌曲、专辑或歌单链接。") from None
-    if not result:
-        raise ValueError("请至少粘贴一个 Apple Music 链接。")
-    return list(dict.fromkeys(result))
-
-
-def run_download(job, stop, post, engine=None, login_service=None):
-    paths = destination_for(job["folder"], job["category"])
-    disk = volume_identity(Path(job["folder"]))
-    engine = engine or Engine(ROOT, find_backend())
-    quality = job["quality"]
-    if job.get("native_account"):
-        login_service = login_service or LoginService(ROOT, settings.DATA)
-        login_service.start(stop, lambda status: post("status", status))
-        if not login_service.status()["logged_in"]:
-            raise ValueError("Apple Music 登录已过期。请在「账户」重新登录。")
-        config = login_service.engine_config()
-        region = config.get("applemusicdecrypt-storefront") or job["region"]
-        config["storefront"] = region
-        config["applemusicdecrypt-storefront"] = region
-    else:
-        config = {"media-user-token": settings.session(job), "storefront": job["region"]}
-        if not config["media-user-token"]:
-            raise ValueError("请先在「账户」登录 Apple Music。")
-        if quality in ("ALAC", "ATMOS"):
-            engine.prepare_service(job["wrapper"], stop, lambda status: post("status", status))
-
-    saved = existing = errors = 0
-    for index, url in enumerate(job["links"], 1):
-        if stop.is_set():
-            break
-        before = saved + existing
-        errors_before = errors
-        prefix = f"链接 {index}/{len(job['links'])}"
-        post("status", prefix + " · 正在读取曲目")
-        post("queue_status", (url, "下载中"))
-
-        def on_event(event):
-            if event.get("event") == "progress":
-                data = event.get("data", {})
-                label = data.get("name") or data.get("phase")
-                if label:
-                    post("status", prefix + " · " + str(label)[:75])
-            elif event.get("event") == "warning":
-                post("log", str(event.get("message", "")))
-
-        with tempfile.TemporaryDirectory(prefix="amdl-") as working:
-            stage = Path(working)
-            try:
-                result = engine.download(config, url, quality, stage, stop, on_event)
-            except Cancelled:
-                post("queue_status", (url, "已取消"))
-                break
-            except (OSError, RuntimeError, ValueError) as error:
-                errors += 1
-                post("log", f"{prefix} · {error}")
-                post("queue_status", (url, "失败"))
-                continue
-            errors += result["errors"]
-            for artifact in result["artifacts"]:
-                if stop.is_set():
-                    break
-                try:
-                    post("status", prefix + " · 正在检查并保存音频")
-                    source, stem = audio.prepare(engine.ffmpeg, stage, artifact, quality,
-                                                 job["output"], job["mp3_bitrate"], stop)
-                    target, written = publish(source, paths, stem, artifact.get("track_id"),
-                                              expected_volume=disk)
-                    saved += int(written)
-                    existing += int(not written)
-                    post("log", ("已保存  " if written else "已存在  ") + target.name)
-                except (Cancelled, audio.Cancelled):
-                    break
-                except (OSError, RuntimeError, ValueError) as error:
-                    errors += 1
-                    post("log", f"曲目 {artifact.get('track_id') or '?'} · {error}")
-        if stop.is_set():
-            post("queue_status", (url, "已取消"))
-        elif saved + existing == before:
-            if errors == errors_before:
-                errors += 1
-            post("queue_status", (url, "失败"))
-        else:
-            post("queue_status", (url, "部分完成" if errors > errors_before else "已完成"))
-    return saved, existing, errors
-
-
 class Studio:
     def __init__(self, window):
         self.window = window
@@ -202,10 +114,16 @@ class Studio:
         self.engine = None
         self.login_service = LoginService(ROOT, settings.DATA)
         self.catalog = CatalogClient()
+        self.bili_auth = BiliAuth(settings.DATA / "bilibili-session.dat")
+        self.music_auth = {"qq": QqAuth(settings.DATA / "qq-music-session.dat"),
+                           "netease": NeteaseAuth(settings.DATA / "netease-music-session.dat")}
+        self.library_cache = LibraryCache(settings.DATA / "library.sqlite3")
         self.background = BG
-        self.queue_rows = {}
-        self.queue_items = {}
-        self.queue_states = {}
+        self.queue_store = QueueStore(settings.DATA / "downloads.sqlite3")
+        recovered = self.queue_store.recover()
+        self.tasks = {}
+        self.resolving_links = False
+        self.links_stop = threading.Event()
         self.active_page = "music"
         self.preview_serial = 0
         self.preview_owner = None
@@ -234,11 +152,14 @@ class Studio:
             self.fields["output"].set("original")
         self.quality_label = tk.StringVar(window, QUALITY[self.fields["quality"].get()])
         self.output_label = tk.StringVar(window, audio.OUTPUTS[self.fields["output"].get()])
+        self.bili_format = tk.StringVar(window, BILI_FORMATS.get(self.preferences["bili_mode"], BILI_FORMATS["video"]))
+        self.youtube_format = tk.StringVar(window, YOUTUBE_FORMATS.get(self.preferences["youtube_mode"], YOUTUBE_FORMATS["video"]))
+        self.queue_source = tk.StringVar(window, QUEUE_SOURCES["all"])
         self.account_status = tk.StringVar(window)
         self.profile_text = tk.StringVar(window, "登录")
         self.profile_connected = False
         self.path_summary = tk.StringVar(window)
-        self.status = tk.StringVar(window, load_error or "就绪")
+        self.status = tk.StringVar(window, load_error or (f"已恢复 {recovered} 项中断任务" if recovered else "就绪"))
         self.engine_status = tk.StringVar(window)
         self.service_status = tk.StringVar(window, "按下载音质启动")
         self.token = tk.StringVar(window)
@@ -266,8 +187,6 @@ class Studio:
         installed_fonts = set(font.families(window))
         self.font = next((family for family in ("Microsoft YaHei UI", "Inter", "Segoe UI")
                           if family in installed_fonts), "TkDefaultFont")
-        self.wordmark_font = next((family for family in ("Inter", "Segoe UI Variable Display", "Segoe UI")
-                                   if family in installed_fonts), self.font)
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
             font.nametofont(name, root=window).configure(family=self.font, size=11)
         self.configure_style()
@@ -286,7 +205,17 @@ class Studio:
 
         self.music_browser = MusicBrowser(self, self.pages["music"])
         self.library_browser = MusicBrowser(self, self.pages["library"], private=True)
+        self.bili_browser = BiliBrowser(self, self.pages["bilibili"], BILI_FORMATS)
+        self.shared_music_browsers = {source: SharedMusicBrowser(self, self.pages[source], source=source)
+                                      for source in ("qq", "netease")}
+        self.video_link_pages = {source: VideoLinkPage(self, self.pages[source], source, YOUTUBE_FORMATS.values())
+                                 for source in ("youtube", "douyin")}
+        self.local_converter = LocalConverter(self, self.pages["local"])
+        self.drop_cleanup = None
         self.make_download()
+        for task in self.queue_store.list_tasks():
+            self.render_task(task)
+        self.update_queue_count()
         build_account_page(self)
         self.make_settings()
         self.make_components()
@@ -306,41 +235,92 @@ class Studio:
             self.start_timer = window.after(250, self.start_service)
 
     def make_sidebar(self):
-        self.rail = tk.Frame(self.window, background=NAV, width=round(156 * self.scale))
+        self.rail = ttk.Frame(self.window, style="Rail.TFrame")
         self.rail.grid(row=0, column=0, sticky="ns")
         self.rail.grid_propagate(False)
         self.rail.columnconfigure(0, weight=1)
+        self.rail.rowconfigure(1, weight=1)
 
-        brand = tk.Frame(self.rail, background=NAV)
-        brand.grid(row=0, column=0, padx=15, pady=(21, 20), sticky="w")
-        self.brand_label = tk.Label(brand, background=NAV, borderwidth=0, padx=0, pady=0)
+        self.brand = tk.Frame(self.rail, background=NAV)
+        self.brand.grid(row=0, column=0, sticky="w")
+        self.brand_label = tk.Label(self.brand, background=NAV, borderwidth=0, padx=0, pady=0)
         self.brand_label.pack(side="left")
-        tk.Label(brand, text=APP_TITLE, font=(self.wordmark_font, 20, "bold"),
-                 background=NAV, foreground="white", padx=0, pady=0).pack(side="left", padx=(7, 0))
+        self.brand_font = font.Font(root=self.window, family=self.font, size=11, weight="bold")
+        self.brand_title = tk.Label(self.brand, text=APP_TITLE, font=self.brand_font,
+                                    background=NAV, foreground=INK, padx=0, pady=0)
+        self.brand_title.pack(side="left")
+
+        viewport = tk.Frame(self.rail, background=NAV)
+        viewport.grid(row=1, column=0, sticky="nsew")
+        viewport.rowconfigure(0, weight=1)
+        viewport.columnconfigure(0, weight=1)
+        self.nav_canvas = tk.Canvas(viewport, background=NAV, borderwidth=0, highlightthickness=0,
+                                    yscrollincrement=round(18 * self.scale), takefocus=False)
+        self.nav_canvas.grid(row=0, column=0, sticky="nsew")
+        self.nav_scrollbar = ttk.Scrollbar(viewport, command=self.nav_canvas.yview, style="Rail.Vertical.TScrollbar",
+                                           takefocus=False)
+        self.nav_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, round(3 * self.scale)))
+        self.nav_scrollbar.grid_remove()
+        self.nav_canvas.configure(yscrollcommand=self.nav_scrollbar.set)
+        self.nav_content = tk.Frame(self.nav_canvas, background=NAV)
+        self.nav_content.columnconfigure(0, weight=1)
+        canvas_item = self.nav_canvas.create_window(0, 0, window=self.nav_content, anchor="nw")
+        self.nav_canvas.bind("<Configure>", lambda event: self._fit_nav(canvas_item, event.width))
+        self.nav_content.bind("<Configure>", lambda _event: self._fit_nav(canvas_item, self.nav_canvas.winfo_width()))
+        for widget in (self.nav_canvas, self.nav_content):
+            widget.bind("<MouseWheel>", self._scroll_nav)
 
         primary_pages = [(key, label) for key, label in PAGES.items() if key != "account"]
-        for row, (key, label) in enumerate(primary_pages, 1):
-            button = ttk.Button(self.rail, text=label, command=lambda page=key: self.show(page),
+        for row, (key, label) in enumerate(primary_pages):
+            button = ttk.Button(self.nav_content, text=label, command=lambda page=key: self.show(page),
                                 style="Nav.TButton", cursor="hand2")
-            button.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
+            button.grid(row=row, column=0, sticky="ew")
+            button.bind("<MouseWheel>", self._scroll_nav)
+            button.bind("<FocusIn>", lambda event: self._reveal_nav(event.widget))
             self.navigation[key] = button
 
-        spacer = len(primary_pages) + 1
-        self.rail.rowconfigure(spacer, weight=1)
         self.profile_button = ttk.Button(
             self.rail, textvariable=self.profile_text, command=lambda: self.show("account"),
             style="Account.TButton", compound="left", cursor="hand2", takefocus=True,
         )
-        self.profile_button.grid(row=spacer + 1, column=0, sticky="ew", padx=10, pady=(11, 14))
+        self.profile_button.grid(row=2, column=0, sticky="ew")
         self.navigation["account"] = self.profile_button
         self.sidebar_assets = {
             prefix: {int(path.stem.rsplit("-", 1)[1]): path for path in (ROOT / "assets").glob(f"{prefix}-[0-9]*.png")
                      if path.stem.rsplit("-", 1)[1].isdigit()}
             for prefix in ("amdl", "account")
         }
-        self.sidebar_size = None
+        self.sidebar_scale = None
         self.refresh_sidebar_art()
         self.window.bind("<Configure>", self.refresh_sidebar_art, add="+")
+
+    def _fit_nav(self, canvas_item, width):
+        height = self.nav_content.winfo_reqheight()
+        self.nav_canvas.itemconfigure(canvas_item, width=width)
+        self.nav_canvas.configure(scrollregion=(0, 0, width, height))
+        if height > self.nav_canvas.winfo_height():
+            self.nav_scrollbar.grid()
+        else:
+            self.nav_canvas.yview_moveto(0)
+            self.nav_scrollbar.grid_remove()
+
+    def _scroll_nav(self, event):
+        if event.delta and self.nav_scrollbar.winfo_ismapped():
+            steps = max(1, abs(event.delta) // 120)
+            self.nav_canvas.yview_scroll(-steps if event.delta > 0 else steps, "units")
+            return "break"
+
+    def _reveal_nav(self, button):
+        if button is self.profile_button or not self.nav_scrollbar.winfo_ismapped():
+            return
+        top = self.nav_canvas.canvasy(0)
+        height = self.nav_canvas.winfo_height()
+        first, last = button.winfo_y(), button.winfo_y() + button.winfo_height()
+        content_height = self.nav_content.winfo_reqheight()
+        if first < top:
+            self.nav_canvas.yview_moveto(max(0, first - round(18 * self.scale)) / content_height)
+        elif last > top + height:
+            self.nav_canvas.yview_moveto((last - height + round(18 * self.scale)) / content_height)
 
     def refresh_sidebar_art(self, event=None):
         if event is not None and event.widget is not self.window:
@@ -354,20 +334,35 @@ class Studio:
                     scale = dpi / 96
             except (AttributeError, OSError):
                 pass
-        sizes = []
-        for prefix, base in (("amdl", 36), ("account", 24)):
-            assets = self.sidebar_assets[prefix]
-            sizes.append(min(assets, key=lambda size: abs(size - base * scale)) if assets else None)
-        if sizes == self.sidebar_size:
+        if scale == self.sidebar_scale:
             return
-        self.sidebar_size = sizes
-        self.rail.configure(width=round(156 * scale))
+        self.sidebar_scale = scale
+        inset = round(10 * scale)
+        gap = round(7 * scale)
+        brand_size = round(32 * scale)
+        width = max(round(144 * scale), brand_size + self.brand_font.measure(APP_TITLE) + gap + 2 * inset + 4)
+        self.rail.configure(width=width)
+        self.rail.grid_configure(padx=(inset, 0), pady=inset)
+        self.brand.grid_configure(padx=inset, pady=(round(13 * scale), round(15 * scale)))
+        self.brand_title.pack_configure(padx=(gap, 0))
+        for key, button in self.navigation.items():
+            padding = (gap, inset) if key == "account" else (gap, 0) if key == "download" else round(scale)
+            button.grid_configure(padx=(inset + gap, inset) if key == "library" else inset, pady=padding)
         self.brand_icon, self.profile_icon = (
-            tk.PhotoImage(master=self.window, file=self.sidebar_assets[prefix][size]) if size else None
-            for prefix, size in zip(("amdl", "account"), sizes)
+            self.sidebar_icon(prefix, size, scale)
+            for prefix, size in (("amdl", brand_size), ("account", round(23 * scale)))
         )
         self.brand_label.configure(image=self.brand_icon)
         self.profile_button.configure(image=self.profile_icon)
+
+    def sidebar_icon(self, prefix, size, scale):
+        assets = self.sidebar_assets[prefix]
+        if not assets:
+            return None
+        glyph_size = max((asset for asset in assets if asset <= size), default=min(assets))
+        glyph = tk.PhotoImage(master=self.window, file=assets[glyph_size])
+        radius = round(8 * scale) if prefix == "amdl" else size / 2
+        return sidebar_badge(self.window, glyph, size, "#163f3b", radius)
 
     def configure_style(self):
         style = ttk.Style(self.window)
@@ -381,22 +376,40 @@ class Studio:
         )
         style.configure("MusicSearch.TEntry", padding=(13, 8))
         for name in ("Nav", "NavActive"):
-            style.configure(f"{name}.TButton", font=(self.font, 11))
+            weight = "bold" if name == "NavActive" else "normal"
+            style.configure(f"{name}.TButton", font=(self.font, 11, weight))
         for name in ("Account", "AccountActive", "AccountSignedIn", "AccountSignedInActive"):
             style.configure(f"{name}.TButton", font=(self.font, 11, "bold"))
         style.configure("TCheckbutton", background=PANEL, foreground=INK)
         style.configure("Surface.TFrame", background=BG)
+        style.configure("MusicToolbar.TFrame", background=PANEL)
+        style.configure("MusicTitle.TLabel", background=PANEL, foreground=INK, font=(self.font, 15, "bold"))
+        style.configure("MusicStatus.TLabel", background=PANEL, foreground=MUTED, font=(self.font, 10))
+        style.layout("Music.Vertical.TScrollbar", [
+            ("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"}),
+            ]}),
+        ])
+        style.configure("Music.Vertical.TScrollbar", background="#d2e2db", troughcolor=PANEL,
+                        bordercolor=PANEL, lightcolor="#d2e2db", darkcolor="#d2e2db", relief="flat",
+                        arrowsize=round(9 * self.scale), gripcount=0)
+        style.map("Music.Vertical.TScrollbar", background=[("active", "#b0cbc0")])
+        style.layout("Rail.Vertical.TScrollbar", style.layout("Music.Vertical.TScrollbar"))
+        style.configure("Rail.Vertical.TScrollbar", background=NAV_ACTIVE, troughcolor=NAV,
+                        bordercolor=NAV, lightcolor=NAV, darkcolor=NAV, relief="flat",
+                        arrowsize=round(7 * self.scale), gripcount=0)
         style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#e0ebe6",
                         lightcolor=ACCENT, darkcolor=ACCENT, bordercolor="#e0ebe6", thickness=6)
-        for name, height in (("Music", 55), ("Queue", 38)):
+        for name, height in (("Music", 64), ("Queue", 38)):
+            heading = "#f1f7f4" if name == "Music" else PANEL
             style.configure(f"{name}.Treeview", rowheight=round(height * self.scale), font=(self.font, 11),
                             fieldbackground=PANEL, background=PANEL, foreground=INK, relief="flat",
                             borderwidth=0, bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL)
-            style.configure(f"{name}.Treeview.Heading", padding=(7, 9), font=(self.font, 10, "bold"),
-                            background=PANEL, foreground=MUTED, bordercolor=PANEL,
-                            lightcolor=PANEL, darkcolor=PANEL, relief="flat")
+            style.configure(f"{name}.Treeview.Heading", padding=(round(8 * self.scale), round(7 * self.scale)),
+                            font=(self.font, 10, "bold"), background=heading, foreground=MUTED,
+                            bordercolor=heading, lightcolor=heading, darkcolor=heading, relief="flat")
             style.map(f"{name}.Treeview", background=[("selected", "#dbefe5")], foreground=[("selected", INK)])
-            style.map(f"{name}.Treeview.Heading", background=[("active", "#eef6f1")])
+            style.map(f"{name}.Treeview.Heading", background=[("active", "#e7f2ed")])
 
     def label(self, parent, text="", *, variable=None, large=False, muted=False, background=PANEL, wrap=615):
         options = {"textvariable": variable} if variable is not None else {"text": text}
@@ -442,47 +455,84 @@ class Studio:
         title.grid(row=0, column=0, sticky="ew")
         title.columnconfigure(0, weight=1)
         self.label(title, "下载队列", large=True, background=BG).grid(row=0, column=0, sticky="w")
-        self.action(title, "添加链接", self.link_dialog).grid(row=0, column=1, padx=(8, 0))
+        source_filter = ttk.Combobox(title, textvariable=self.queue_source, values=list(QUEUE_SOURCES.values()),
+                                     state="readonly", width=12, style="Surface.TCombobox")
+        source_filter.grid(row=0, column=1, padx=(8, 0))
+        source_filter.bind("<<ComboboxSelected>>", lambda _: self.apply_queue_source())
+        self.add_link_button = self.action(title, "添加链接", self.link_dialog)
+        self.add_link_button.grid(row=0, column=2, padx=(8, 0))
         self.remove_button = self.action(title, "移除", self.remove_queued)
-        self.remove_button.grid(row=0, column=2, padx=(8, 0))
+        self.remove_button.grid(row=0, column=3, padx=(8, 0))
 
         options = ttk.Frame(page, style="Surface.TFrame")
         options.grid(row=1, column=0, sticky="ew", pady=(12, 8))
         options.columnconfigure(1, weight=1)
+        self.apple_format_label = self.label(options, "Apple Music 音质", background=BG, muted=True)
+        self.apple_format_label.grid(row=0, column=0, sticky="w", padx=(0, 7))
         self.quality_box = ttk.Combobox(options, textvariable=self.quality_label,
                                         values=list(QUALITY.values()), state="readonly", width=17,
                                         style="Surface.TCombobox")
-        self.quality_box.grid(row=0, column=0, sticky="w")
+        self.quality_box.grid(row=0, column=1, sticky="w")
         self.quality_box.bind("<<ComboboxSelected>>", self.quality_changed)
-        self.label(options, variable=self.path_summary, background=BG, muted=True, wrap=390).grid(
-            row=0, column=1, sticky="w", padx=10)
-        self.action(options, "保存目录", self.browse_folder).grid(row=0, column=2)
-        self.action(options, "打开", self.open_folder).grid(row=0, column=3, padx=(6, 0))
+        self.bili_format_label = self.label(options, "B 站格式", background=BG, muted=True)
+        self.bili_format_label.grid(row=1, column=0, sticky="w", padx=(0, 7), pady=(6, 0))
+        self.bili_format_box = ttk.Combobox(options, textvariable=self.bili_format, values=list(BILI_FORMATS.values()),
+                                            state="readonly", width=15, style="Surface.TCombobox")
+        self.bili_format_box.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        self.bili_format_box.bind("<<ComboboxSelected>>", self.quality_changed)
+        self.bili_options = ttk.Frame(options, style="Surface.TFrame")
+        self.bili_options.grid(row=2, column=0, columnspan=5, sticky="w", pady=(5, 0))
+        self.bili_danmaku_box = ttk.Checkbutton(self.bili_options, text="保存弹幕（ASS）", variable=self.fields["bili_danmaku"],
+                                               command=self.save_preferences, style="Surface.TCheckbutton")
+        self.bili_danmaku_box.pack(side="left")
+        self.bili_subtitle_box = ttk.Checkbutton(self.bili_options, text="保存字幕（SRT）", variable=self.fields["bili_subtitle"],
+                                               command=self.save_preferences, style="Surface.TCheckbutton")
+        self.bili_subtitle_box.pack(side="left", padx=10)
+        self.bili_category_box = ttk.Checkbutton(self.bili_options, text="自动分类", variable=self.fields["bili_auto_category"],
+                                                command=self.save_preferences, style="Surface.TCheckbutton")
+        self.bili_category_box.pack(side="left")
+        self.youtube_format_label = self.label(options, "YouTube 格式", background=BG, muted=True)
+        self.youtube_format_label.grid(row=3, column=0, sticky="w", padx=(0, 7), pady=(6, 0))
+        self.youtube_format_box = ttk.Combobox(options, textvariable=self.youtube_format, values=list(YOUTUBE_FORMATS.values()),
+                                               state="readonly", width=15, style="Surface.TCombobox")
+        self.youtube_format_box.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        self.youtube_format_box.bind("<<ComboboxSelected>>", self.quality_changed)
+        options.columnconfigure(1, weight=0)
+        options.columnconfigure(2, weight=1)
+        self.label(options, variable=self.path_summary, background=BG, muted=True, wrap=245).grid(
+            row=0, rowspan=2, column=2, sticky="w", padx=10)
+        self.action(options, "保存目录", self.browse_folder).grid(row=0, rowspan=2, column=3)
+        self.action(options, "打开", self.open_folder).grid(row=0, rowspan=2, column=4, padx=(6, 0))
 
         results = self.panel(page, padding=(8, 6))
         results.grid(row=2, column=0, sticky="nsew")
         results.columnconfigure(0, weight=1)
         results.rowconfigure(0, weight=1)
-        self.queue_tree = ttk.Treeview(results, columns=("title", "artist", "state"),
+        self.queue_tree = ttk.Treeview(results, columns=("title", "artist", "batch", "state"),
                                        show="headings", selectmode="extended", style="Queue.Treeview")
+        headings = {}
         for name, label, width, minimum in (
-            ("title", "名称", 360, 140), ("artist", "艺人", 160, 85), ("state", "状态", 90, 75),
+            ("title", "名称", 250, 140), ("artist", "来源 / 艺人", 116, 70),
+            ("batch", "歌单 / 分 P", 200, 110), ("state", "状态", 84, 74),
         ):
+            headings[name] = label
             self.queue_tree.heading(name, text=label)
             self.queue_tree.column(name, width=width, minwidth=minimum, stretch=name != "state")
-        self.queue_sort = TreeSort(self.queue_tree, {"title": "名称", "artist": "艺人", "state": "状态"},
+        self.queue_sort = TreeSort(self.queue_tree, headings,
                                    lambda row, column: self.queue_tree.set(row, column))
         self.queue_tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(results, command=self.queue_tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.queue_tree.configure(yscrollcommand=scroll.set)
         self.queue_tree.bind("<Delete>", lambda _: self.remove_queued())
+        self.queue_tree.bind("<Double-1>", self.open_task_details)
+        self.queue_tree.bind("<Button-3>", self.queue_context_menu)
 
         buttons = ttk.Frame(page, style="Surface.TFrame")
         buttons.grid(row=3, column=0, sticky="ew", pady=(9, 7))
-        self.start_button = self.action(buttons, "开始下载", self.start_download, primary=True)
+        self.start_button = self.action(buttons, "开始 / 继续", self.start_download, primary=True)
         self.start_button.pack(side="left")
-        self.cancel_button = self.action(buttons, "取消", self.cancel)
+        self.cancel_button = self.action(buttons, "暂停", self.pause)
         self.cancel_button.pack(side="left", padx=7)
         self.cancel_button.configure(state="disabled")
         self.action(buttons, "下载记录", self.history_dialog).pack(side="right")
@@ -495,68 +545,308 @@ class Studio:
         self.history_window = None
 
     def queue_music(self, items, begin=False):
-        accepted = {}
+        accepted = []
         for item in items:
             try:
                 url = read_links(item.get("url", ""))[0]
             except ValueError:
                 continue
-            accepted[url] = None
-            if url in self.queue_rows:
-                if self.queue_states[url] != "下载中":
-                    self.set_queue_state(url, "待下载")
-                continue
-            name = item.get("title") or url
-            artist = item.get("artist") or ""
-            row = self.queue_tree.insert("", "end", values=(name, artist, "待下载"))
-            self.queue_items[row] = url
-            self.queue_rows[url] = row
-            self.queue_states[url] = "待下载"
+            accepted.append(dict(item, source=SOURCE, url=url))
+        return self.enqueue_tasks(accepted, begin)
+
+    def queue_bili(self, rows, begin=False):
+        return self.enqueue_tasks(rows, begin)
+
+    def queue_local(self, paths, output, folder):
+        rows = []
+        start_ids = []
+        try:
+            job = self.snapshot()
+            for path in paths:
+                info = path.stat()
+                destination = str(Path(folder) if folder else path.parent)
+                options = download_options({**job, "folder": destination, "category": ""})
+                options.update(local_format=output, local_size=info.st_size, local_mtime=info.st_mtime_ns)
+                key = f"{os.path.normcase(destination)}\0{output}\0{info.st_size}\0{info.st_mtime_ns}"
+                batch = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+                rows.append({"source": "local", "url": str(path), "title": path.name, "batch_key": batch,
+                             "batch_title": LOCAL_FORMATS[output], "options": options})
+            tasks = self._add_tasks(rows)
+            start_ids = [task.id for task in tasks.values() if task.state not in ("running", "complete")]
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            self.error("无法加入转码队列", error)
+            return 0
+        if tasks:
+            self.show_download_source("local")
+            if start_ids:
+                self.queue_tree.selection_set(*(str(task_id) for task_id in start_ids))
+                self.start_download(start_ids)
+            else:
+                self.status.set("已有相同的已完成转码任务。")
+        return len(tasks)
+
+    def on_file_drop(self, paths):
+        if self.closing:
+            return
+        self.show("local")
+        if self.local_converter.add_files(paths):
+            self.local_converter.quick_actions()
+
+    def show_download_source(self, source):
+        self.queue_source.set(QUEUE_SOURCES[source])
+        self.apply_queue_source()
+        self.show("download")
+
+    def apply_queue_source(self):
+        source = self.selected_queue_source()
+        shown = [str(task.id) for task in self.tasks.values() if source == "all" or task.source == source]
+        hidden = set(self.queue_tree.selection()) - set(shown)
+        if hidden:
+            self.queue_tree.selection_remove(*hidden)
+        self.queue_tree.set_children("", *shown)
+        self.queue_sort.apply()
+        for key, widgets in ((SOURCE, (self.apple_format_label, self.quality_box)),
+                             ("bilibili", (self.bili_format_label, self.bili_format_box, self.bili_options)),
+                             ("youtube", (self.youtube_format_label, self.youtube_format_box))):
+            for widget in widgets:
+                if source in ("all", key):
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+
+    def selected_queue_source(self):
+        return next(key for key, label in QUEUE_SOURCES.items() if label == self.queue_source.get())
+
+    def enqueue_tasks(self, rows, begin):
+        try:
+            tasks = self._add_tasks(rows)
+        except (OSError, sqlite3.Error, ValueError) as error:
+            self.error("无法加入队列", error)
+            return 0
+        if tasks and begin:
+            sources = {task.source for task in tasks.values()}
+            self.show_download_source(next(iter(sources)) if len(sources) == 1 else "all")
+            self.start_download(tasks)
+        return len(tasks)
+
+    def _add_tasks(self, rows):
+        tasks = {task.id: task for task in self.queue_store.add(rows)}
+        for task in tasks.values():
+            self.render_task(task)
         self.queue_sort.apply()
         self.update_queue_count()
-        if accepted and begin:
-            self.show("download")
-            if not self.busy:
-                self.start_download(list(accepted))
-        return len(accepted)
+        return tasks
 
-    def set_queue_state(self, url, state):
-        if url in self.queue_rows:
-            self.queue_states[url] = state
-            self.queue_tree.set(self.queue_rows[url], "state", state)
-            if self.queue_sort.column == "state":
-                self.queue_sort.apply()
-            self.update_queue_count()
+    def render_task(self, task):
+        row = str(task.id)
+        batch = task.batch_title
+        if task.position:
+            unit = "项" if task.source in ("bilibili", "youtube") else "首"
+            position = f"{task.position}/{task.total}" if task.total else f"第 {task.position} {unit}"
+            batch = f"{position} · {batch}"
+        artist = task.artist if task.source == SOURCE else QUEUE_SOURCES.get(task.source, task.source)
+        values = (task.title, artist, batch, TASK_LABELS[task.state])
+        if task.id in self.tasks:
+            self.queue_tree.item(row, values=values)
+        else:
+            self.queue_tree.insert("", "end", iid=row, values=values)
+        self.tasks[task.id] = task
+        source = self.selected_queue_source()
+        if source not in ("all", task.source):
+            self.queue_tree.detach(row)
 
     def update_queue_count(self):
-        pending = sum(state in ("待下载", "下载中") for state in self.queue_states.values())
+        pending = sum(task.state in ("pending", "running", "interrupted") for task in self.tasks.values())
         self.navigation["download"].configure(text=f"下载队列  {pending}" if pending else "下载队列")
 
     def remove_queued(self):
         if self.busy:
             return
-        for row in self.queue_tree.selection():
-            url = self.queue_items.pop(row)
-            self.queue_rows.pop(url)
-            self.queue_states.pop(url)
+        rows = self.queue_tree.selection()
+        try:
+            self.queue_store.remove(int(row) for row in rows)
+        except sqlite3.Error as error:
+            self.error("无法移除下载任务", error)
+            return
+        for row in rows:
+            task = self.tasks.pop(int(row))
+            if task.state in ("failed", "interrupted", "cancelled"):
+                forget_bilibili_cache(self.queue_store, task)
             self.queue_tree.delete(row)
         self.update_queue_count()
 
-    def add_link_text(self, text, begin=False):
+    def open_task_details(self, event):
+        row = self.queue_tree.identify_row(event.y)
+        if row:
+            self.show_task_details(row)
+
+    def show_task_details(self, row):
+        task = self.tasks[int(row)]
+        lines = [task.title, TASK_LABELS[task.state]]
+        if task.uploader:
+            lines.append(f"投稿者 · {task.uploader}")
+        if task.source_category:
+            lines.append(f"分区 · {task.source_category}")
+        if task.options:
+            if task.source == "bilibili":
+                lines.append(BILI_FORMATS.get(task.options.get("bili_mode"), BILI_FORMATS["video"]))
+                if task.audio_title:
+                    title = f"{task.artist} - {task.audio_title}" if task.artist else task.audio_title
+                    lines.append(f"识别歌名 · {title}")
+                if task.options.get("bili_danmaku"):
+                    lines.append("保存弹幕（ASS）")
+                if task.options.get("bili_subtitle"):
+                    lines.append("保存字幕（SRT）")
+            elif task.source == "youtube":
+                lines.append(YOUTUBE_FORMATS.get(task.options.get("youtube_mode"), YOUTUBE_FORMATS["video"]))
+            elif task.source == "local":
+                lines.extend((task.url, LOCAL_FORMATS.get(task.options.get("local_format"), "")))
+            lines.append(str(Path(task.options["folder"]) / task_category(task)))
+        if task.error:
+            lines.append(task.error)
+        lines.extend(task.files)
+        messagebox.showinfo("下载任务", "\n".join(lines), parent=self.window)
+
+    def queue_context_menu(self, event):
+        row = self.queue_tree.identify_row(event.y)
+        if not row:
+            return
+        if row not in self.queue_tree.selection():
+            self.queue_tree.selection_set(row)
+        menu = tk.Menu(self.queue_tree, tearoff=False)
+        menu.add_command(label="查看任务详情", command=lambda: self.show_task_details(row))
+        if any(self.tasks[int(item)].files for item in self.queue_tree.selection()):
+            menu.add_command(label="用已保存文件转码", command=self.convert_saved_selection)
+            menu.add_command(label="导出播放列表（M3U8）", command=self.export_queue_playlist)
+        remote = all(self.tasks[int(item)].source != "local" for item in self.queue_tree.selection())
+        menu.add_command(label="按当前设置重新排队", command=self.requeue_selected,
+                         state="normal" if remote and not self.busy else "disabled")
         try:
-            links = read_links(text)
-        except ValueError as error:
-            self.error("添加链接", error)
-            return False
-        rows = []
-        for url in links:
-            parts = urlsplit(url).path.strip("/").split("/")
-            title = parts[-2].replace("-", " ") if len(parts) > 3 else url
-            rows.append({"url": url, "title": title})
-        self.queue_music(rows, begin=begin)
-        if not begin:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def convert_saved_selection(self):
+        paths = [path for row in self.queue_tree.selection() for path in self.tasks[int(row)].files]
+        if paths:
+            self.show("local")
+            self.local_converter.add_files(paths)
+
+    def export_queue_playlist(self):
+        selected = set(self.queue_tree.selection())
+        tasks = [self.tasks[int(row)] for row in self.queue_tree.get_children() if row in selected]
+        batches = {task.batch_title for task in tasks if task.files}
+        batch = next(iter(batches)) if len(batches) == 1 else ""
+        initial_dir = next((Path(task.files[0]).parent for task in tasks if task.files), None)
+        if initial_dir is None:
+            return
+        path = filedialog.asksaveasfilename(parent=self.window, title="导出播放列表",
+                                            initialdir=str(initial_dir), initialfile=f"{clean_name(batch or '播放列表')}.m3u8",
+                                            defaultextension=".m3u8", filetypes=[("M3U8 播放列表", "*.m3u8")])
+        if not path:
+            return
+        try:
+            count = save_m3u8(path, tasks)
+        except (OSError, ValueError) as error:
+            self.error("无法导出播放列表", error)
+        else:
+            self.status.set(f"已导出 {count} 首 · {Path(path).name}")
+
+    def requeue_selected(self):
+        if self.busy:
+            return
+        if any(self.tasks[int(row)].source == "local" for row in self.queue_tree.selection()):
+            return
+        try:
+            job = self.snapshot()
+            if not job["folder"]:
+                self.browse_folder()
+                job = self.snapshot()
+                if not job["folder"]:
+                    return
+            options = download_options(job)
+            self.store(job)
+            tasks = self.queue_store.requeue((int(row) for row in self.queue_tree.selection()), options)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            self.error("无法重新排队", error)
+            return
+        for task in tasks:
+            self.render_task(task)
+        self.queue_tree.selection_set(tuple(str(task.id) for task in tasks))
+        self.queue_sort.apply()
+        self.update_queue_count()
+        self.status.set(f"已按当前设置重新排队 {len(tasks)} 首")
+
+    def add_link_text(self, text, begin=False):
+        if self.resolving_links:
+            self.status.set("正在读取上一批链接…")
             self.show("download")
+            return False
+        links = list(dict.fromkeys(line.strip() for line in text.splitlines() if line.strip()))
+        if not links:
+            self.error("添加链接", "请粘贴受支持的音乐或视频链接。")
+            return False
+        if len(links) == 1:
+            link = links[0]
+            if is_collection_link(link):
+                self.show("bilibili")
+                return self.bili_browser.load_link(link)
+            source = shared_music_source(link)
+            if source:
+                browser = self.shared_music_browsers[source]
+                self.show(source)
+                browser.link.set(link)
+                browser.resolve()
+                return True
+            source = video_link_source(link)
+            if source:
+                self.show(source)
+                self.video_link_pages[source].load_link(link)
+                return True
+        self.show_download_source("all")
+        self.resolving_links = True
+        self.add_link_button.configure(state="disabled")
+        self.status.set("正在读取链接…")
+        region = self.catalog_region()
+        bili_session = self.bili_browser.account.session
+
+        def resolve():
+            rows, errors = [], []
+            for link in links:
+                if self.closing:
+                    return
+                try:
+                    if is_collection_link(link):
+                        collection = resolve_collection(link, session=bili_session, stop=self.links_stop)
+                        rows.extend(collection["rows"])
+                        if collection.get("warning"):
+                            errors.append(collection["warning"])
+                    elif is_video_link(link):
+                        rows.extend(resolve_video(link, session=bili_session)["rows"])
+                    else:
+                        apple_link, = read_links(link)
+                        rows.extend(dict(row, source=SOURCE) for row in expand_link(apple_link, self.catalog, region))
+                except (OSError, RuntimeError, ValueError) as error:
+                    errors.append(str(error))
+            self.post("links_resolved", (rows, errors, begin))
+
+        threading.Thread(target=resolve, daemon=True).start()
         return True
+
+    def finish_links(self, rows, errors, begin):
+        self.resolving_links = False
+        self.add_link_button.configure(state="normal")
+        if self.closing:
+            return
+        for error in errors:
+            self.log_message(error)
+        count = self.enqueue_tasks(rows, begin=begin)
+        if not self.busy:
+            if errors:
+                self.status.set(f"已加入 {count} 项 · {errors[0]}" if len(errors) == 1 else
+                                f"已加入 {count} 项 · {len(errors)} 个链接未能读取")
+            else:
+                self.status.set(f"已加入队列 {count} 项")
 
     def link_dialog(self):
         popup = tk.Toplevel(self.window)
@@ -593,7 +883,15 @@ class Studio:
         panel.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
         history = self.textbox(panel, 12, width=65)
         history.pack(fill="both", expand=True)
-        history.insert("1.0", "\n".join(self.history))
+        saved = []
+        for task in self.tasks.values():
+            if task.state not in ("complete", "failed", "interrupted"):
+                continue
+            saved.append(f"{TASK_LABELS[task.state]} · {task.title}")
+            if task.error:
+                saved.append(task.error)
+            saved.extend(task.files)
+        history.insert("1.0", "\n".join(saved + self.history))
         history.configure(state="disabled")
         self.history_text = history
         self.history_window = popup
@@ -646,6 +944,7 @@ class Studio:
             self.stop_preview()
         self.active_page = page
         self.pages[page].tkraise()
+        self._reveal_nav(self.navigation[page])
         for key, button in self.navigation.items():
             if key != "account":
                 button.configure(style="NavActive.TButton" if key == page else "Nav.TButton")
@@ -833,6 +1132,8 @@ class Studio:
         values = {key: var.get() for key, var in self.fields.items()}
         values["quality"] = next(key for key, label in QUALITY.items() if label == self.quality_label.get())
         values["output"] = next(key for key, label in audio.OUTPUTS.items() if label == self.output_label.get())
+        values["bili_mode"] = next(key for key, label in BILI_FORMATS.items() if label == self.bili_format.get())
+        values["youtube_mode"] = next(key for key, label in YOUTUBE_FORMATS.items() if label == self.youtube_format.get())
         values["mp3_bitrate"] = int(values["mp3_bitrate"])
         if values["mp3_bitrate"] not in audio.MP3_BITRATES:
             raise ValueError("请选择有效的 MP3 码率。")
@@ -1099,51 +1400,81 @@ class Studio:
             self.engine = Engine(ROOT, find_backend())
         return self.engine
 
-    def start_download(self, links=None):
+    def start_download(self, task_ids=None):
         if self.busy:
             return
-        if self.auth_busy:
-            self.status.set("请先完成 Apple Music 登录。")
-            return
         try:
-            if links is None:
-                selected = {self.queue_items[row] for row in self.queue_tree.selection()}
-                ordered = (self.queue_items[row] for row in self.queue_tree.get_children())
-                links = [url for url in ordered if
-                         (url in selected if selected else self.queue_states[url] != "已完成")]
-            if not links:
+            if task_ids is None:
+                selected = set(self.queue_tree.selection())
+                task_ids = [int(row) for row in self.queue_tree.get_children() if not selected or row in selected]
+            tasks = [self.tasks[task_id] for task_id in task_ids
+                     if self.tasks[task_id].state not in ("running", "complete")]
+            if not tasks:
                 self.status.set("队列里没有待下载项目。")
                 return
             job = self.snapshot()
-            if not job.get("native_account") and not job.get("session"):
-                self.show("account")
-                raise ValueError("请先登录 Apple Music。")
-            if not job["folder"]:
-                self.browse_folder()
-                job = self.snapshot()
-                if not job["folder"]:
+            apple_only = all(task.source == SOURCE for task in tasks)
+            apple_ready = not self.auth_busy and (job.get("native_account") or job.get("session"))
+            if not apple_ready:
+                if apple_only:
+                    if self.auth_busy:
+                        self.status.set("请先完成 Apple Music 登录。")
+                        return
+                    self.show("account")
+                    raise ValueError("请先登录 Apple Music。")
+                if any(task.source == SOURCE for task in tasks):
+                    self.log_message("Apple Music 任务等待登录，本次继续处理其他来源。")
+                    tasks = [task for task in tasks if task.source != SOURCE]
+            qq_account = self.shared_music_browsers["qq"].account
+            sessions = {source: browser.account.session for source, browser in self.shared_music_browsers.items()}
+            sessions["bilibili"] = self.bili_browser.account.session
+            if sessions["qq"] is None and any(task.source == "qq" for task in tasks):
+                tasks = [task for task in tasks if task.source != "qq"]
+                if not tasks:
+                    self.status.set("请先登录 QQ 音乐。")
+                    self.show("qq")
+                    qq_account.open()
                     return
-            destination_for(job["folder"], job["category"])
-            job["links"] = links
+                self.log_message("QQ 音乐任务等待登录，本次继续处理其他来源。")
+            if any(task.options is None for task in tasks):
+                if not job["folder"]:
+                    self.browse_folder()
+                    job = self.snapshot()
+                    if not job["folder"]:
+                        return
+                options = download_options(job)
+                self.store(job)
+                tasks = self.queue_store.prepare((task.id for task in tasks), options)
+                for task in tasks:
+                    self.render_task(task)
             engine = self.get_engine()
-            self.store(job)
-        except (OSError, RuntimeError, ValueError) as error:
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
             self.error("请检查下载设置", error)
             return
         self.stop.clear()
         self.set_busy(True)
         self.status.set("正在准备下载…")
-        threading.Thread(target=self.worker, args=(job, engine)).start()
+        threading.Thread(target=self.worker, args=(tasks, job, engine, sessions)).start()
 
-    def worker(self, job, engine):
+    def worker(self, tasks, job, engine, sessions):
         try:
-            self.post("done", run_download(job, self.stop, self.post, engine, self.login_service))
-        except Cancelled:
-            self.post("done", (0, 0, 0))
-        except (OSError, RuntimeError, ValueError) as error:
-            self.post("failed", str(error))
+            result = run_tasks(self.queue_store, tasks, job, engine, self.login_service, self.stop, self.post,
+                               sessions=sessions)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            failure = str(error)
         except Exception as error:
-            self.post("failed", f"程序遇到意外错误（{type(error).__name__}）。")
+            failure = f"程序遇到意外错误（{type(error).__name__}）。"
+        else:
+            self.post("done", result)
+            return
+        try:
+            if self.queue_store.recover():
+                for task in self.queue_store.list_tasks():
+                    if task.state == "interrupted":
+                        self.post("queue_task", task)
+        except sqlite3.Error:
+            pass
+        self.post("failed", failure)
 
     def set_busy(self, busy):
         self.busy = busy
@@ -1151,25 +1482,39 @@ class Studio:
         self.start_button.configure(state=state)
         self.remove_button.configure(state=state)
         self.quality_box.configure(state="disabled" if busy else "readonly")
+        self.bili_format_box.configure(state="disabled" if busy else "readonly")
+        self.youtube_format_box.configure(state="disabled" if busy else "readonly")
+        self.bili_danmaku_box.configure(state=state)
+        self.bili_subtitle_box.configure(state=state)
+        self.bili_category_box.configure(state=state)
         self.cancel_button.configure(state="normal" if busy else "disabled")
         if busy:
             self.progress.start(14)
         else:
             self.progress.stop()
 
-    def cancel(self):
+    def pause(self):
         self.stop.set()
         self.cancel_button.configure(state="disabled")
-        self.status.set("正在取消…")
+        self.status.set("正在暂停…")
 
     def close(self):
         self.closing = True
+        self.links_stop.set()
+        self.bili_browser.stop.set()
+        for page in self.video_link_pages.values():
+            page.stop.set()
+        self.bili_browser.account.close()
+        for browser in self.shared_music_browsers.values():
+            browser.close()
+        self.music_browser.stop_view_updates()
+        self.library_browser.stop_view_updates()
         self.stop_preview()
         self.service_stop.set()
         self.auth_stop.set()
         self.reset_login()
         if self.busy:
-            self.cancel()
+            self.pause()
         self.finish_close()
 
     def finish_close(self):
@@ -1187,6 +1532,8 @@ class Studio:
         for timer in (self.start_timer, self.pump_timer):
             if timer:
                 self.window.after_cancel(timer)
+        if self.drop_cleanup is not None:
+            self.drop_cleanup()
         self.window.destroy()
         return True
 
@@ -1210,11 +1557,36 @@ class Studio:
                 self.status.set(value)
             elif kind == "log":
                 self.log_message(value)
-            elif kind == "queue_status":
-                self.set_queue_state(*value)
+            elif kind == "queue_task":
+                self.render_task(value)
+                if self.queue_sort.column == "state":
+                    self.queue_sort.apply()
+                self.update_queue_count()
+            elif kind == "links_resolved":
+                self.finish_links(*value)
+            elif kind == "bili_result":
+                self.bili_browser.receive(*value)
+            elif kind == "youtube_result":
+                self.video_link_pages["youtube"].receive(*value)
+            elif kind == "bili_auth":
+                self.bili_browser.account.receive(*value)
+            elif kind == "qq_auth":
+                self.shared_music_browsers["qq"].account.receive(*value)
+            elif kind == "netease_auth":
+                self.shared_music_browsers["netease"].account.receive(*value)
+            elif kind == "shared_music_result":
+                source, *result = value
+                if source in self.shared_music_browsers:
+                    self.shared_music_browsers[source].receive(*result)
+            elif kind == "browser_batch":
+                browser, *result = value
+                browser.receive_batch(*result)
             elif kind == "browser_result":
                 browser, *result = value
                 browser.receive(*result)
+            elif kind == "browser_library":
+                browser, *progress = value
+                browser.receive_library(*progress)
             elif kind == "browser_art":
                 browser, *art = value
                 browser.receive_art(*art)
@@ -1254,16 +1626,43 @@ class Studio:
                 if self.finish_close():
                     return
                 if kind == "done":
-                    state = "已取消" if self.stop.is_set() else "处理完成"
-                    saved, existing, errors = value
+                    state = "已暂停" if self.stop.is_set() else "处理结束"
+                    saved, existing, errors, waiting = value
                     value = f"{state} · 新增 {saved} · 已存在 {existing} · 失败 {errors}"
+                    if waiting:
+                        value += f" · 等待原保存磁盘 {waiting}"
                 self.status.set(value)
                 self.log_message(value)
         self.pump_timer = self.window.after(80, self.pump)
 
 
-if __name__ == "__main__":
+def main():
     configure_windows()
     window = tk.Tk()
-    Studio(window)
-    window.mainloop()
+    window.withdraw()
+    try:
+        settings.DATA.mkdir(parents=True, exist_ok=True)
+        with (settings.DATA / "downloads.lock").open("a+b") as lock:
+            lock.seek(0)
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                messagebox.showinfo(APP_TITLE, "影音下载台已在运行。", parent=window)
+                return
+            app = Studio(window)
+            window.deiconify()
+            window.update_idletasks()
+            try:
+                app.drop_cleanup = install_drop_target(window, app.on_file_drop)
+            except OSError:
+                app.local_converter.status.set("点「添加文件」选择要转码的音频或视频。")
+            window.mainloop()
+    except (OSError, sqlite3.Error) as error:
+        messagebox.showerror(APP_TITLE, f"无法打开下载队列。\n{error}", parent=window)
+    finally:
+        if window.tk.call("info", "commands", "."):
+            window.destroy()
+
+
+if __name__ == "__main__":
+    main()

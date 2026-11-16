@@ -5,9 +5,9 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("amdl")]
-[assembly: AssemblyDescription("amdl")]
-[assembly: AssemblyProduct("amdl")]
+[assembly: AssemblyTitle("影音下载台")]
+[assembly: AssemblyDescription("Media Download Desk")]
+[assembly: AssemblyProduct("影音下载台")]
 
 internal static class Launcher
 {
@@ -23,8 +23,8 @@ internal static class Launcher
         string studio = Path.Combine(home, "Studio.py");
         if (!File.Exists(python) || !File.Exists(studio))
         {
-            MessageBox.Show("安装文件不完整，请重新运行 amdl 安装程序。",
-                "amdl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show("安装文件不完整，请重新运行影音下载台安装程序。",
+                "影音下载台", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
@@ -46,8 +46,8 @@ internal static class Launcher
         }
         catch (Exception)
         {
-            MessageBox.Show("无法打开 amdl，请检查安装文件。",
-                "amdl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show("无法打开影音下载台，请检查安装文件。",
+                "影音下载台", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 }

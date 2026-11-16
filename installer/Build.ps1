@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '0.3.2',
+    [string]$Version = '0.3.19',
     [string]$ApmyxHome = (Join-Path $env:LOCALAPPDATA 'Programs\apmyx'),
     [string]$PythonHome = (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python'),
     [string]$PythonLib,
@@ -19,7 +19,7 @@ if (-not $AudioTools) { $AudioTools = Join-Path $workspace 'wsl1\deps-win' }
 $distribution = Join-Path (Join-Path $PSScriptRoot 'dist') $Version
 $portable = Join-Path $distribution 'amdl'
 $buildTools = Join-Path $PSScriptRoot '.tools'
-$setup = Join-Path $distribution 'amdl-setup.exe'
+$setup = Join-Path $distribution 'MediaDownloadDesk-Setup.exe'
 
 function Assert-LocalDirectory([string]$Path) {
     $item = Get-Item -LiteralPath $Path
@@ -75,6 +75,59 @@ function Test-PinnedArchive([string]$Path, [long]$Length, [string]$Hash) {
         (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -eq $Hash)
 }
 
+function Copy-PinnedWebFile([string]$Name, [string]$Url, [long]$Length, [string]$Hash, [string]$Destination) {
+    $cache = Join-Path $buildTools $Name
+    if (-not (Test-PinnedArchive $cache $Length $Hash)) {
+        $partial = Join-Path $buildTools "$Name.$([Guid]::NewGuid().ToString('N')).partial"
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $partial
+            if (-not (Test-PinnedArchive $partial $Length $Hash)) {
+                throw "The downloaded $Name does not match the pinned SHA-256 and size."
+            }
+            Move-Item -LiteralPath $partial -Destination $cache -Force
+        } finally {
+            if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial }
+        }
+    }
+    Copy-Item -LiteralPath $cache -Destination $Destination
+}
+
+function Install-WebWorker([string]$Backend) {
+    $web = Join-Path $Backend 'web'
+    [void][IO.Directory]::CreateDirectory($web)
+    Copy-PinnedWebFile 'yt-dlp-2026.10.26.pyz' 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp' `
+        3073072 'e51e69e89489f199530f13d32a4342da3ddb2cf34842f364603a066db05afbf3' (Join-Path $web 'yt-dlp.pyz')
+    Copy-PinnedWebFile 'qjs-v0.18.0-windows-x86_64.exe' 'https://github.com/quickjs-ng/quickjs/releases/download/v0.18.0/qjs-windows-x86_64.exe' `
+        1873152 'ff03398d74ea6e6bd3a8e58058f7003225abcac229d7d57775b7aaae812a49c7' (Join-Path $web 'qjs.exe')
+    Copy-PinnedWebFile 'yt-dlp-2026.10.26-LICENSE.txt' 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.10.26/LICENSE' `
+        1211 '7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c' (Join-Path $web 'yt-dlp-LICENSE.txt')
+    Copy-PinnedWebFile 'quickjs-ng-v0.18.0-LICENSE.txt' 'https://raw.githubusercontent.com/quickjs-ng/quickjs/v0.18.0/LICENSE' `
+        1212 '96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171' (Join-Path $web 'quickjs-ng-LICENSE.txt')
+    Copy-PinnedWebFile 'yt-dlp-ejs-0.8.0-LICENSE.txt' 'https://raw.githubusercontent.com/yt-dlp/ejs/0.8.0/LICENSE' `
+        1212 'b5065838cbac452dfc855ba6e6e031481ad2c68406f70d21ead9321374653e6c' (Join-Path $web 'yt-dlp-ejs-LICENSE.txt')
+}
+
+function Install-QrEncoder([string]$Python, [string]$Library) {
+    $name = 'qrcodegen-1.8.0-py3-none-any.whl'
+    $hash = '06bf87021bc351f1c6e722ac67db8a059c4fe27bbfbca39ed7a9a2364abdd7a6'
+    $length = 14443
+    $cache = Join-Path $buildTools $name
+    if (-not (Test-PinnedArchive $cache $length $hash)) {
+        $partial = Join-Path $buildTools "$name.$([Guid]::NewGuid().ToString('N')).partial"
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://files.pythonhosted.org/packages/10/2b/fb03f5a840469f627d71690a95e8a53e3ea53ef6d752c93f34a5a65ee061/$name" -OutFile $partial
+            if (-not (Test-PinnedArchive $partial $length $hash)) {
+                throw 'The QR encoder did not match its pinned wheel.'
+            }
+            Move-Item -LiteralPath $partial -Destination $cache -Force
+        } finally {
+            if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial }
+        }
+    }
+    & $Python -I -B -c 'import pathlib, sys, zipfile; package = zipfile.ZipFile(sys.argv[1]); name = "qrcodegen.py"; (pathlib.Path(sys.argv[2]) / name).write_bytes(package.read(name))' $cache $Library
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stage the pinned QR encoder.' }
+}
+
 function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
     $json = & $Python -I -B -c 'import json, runpy, sys; m = runpy.run_path(sys.argv[1]); print(json.dumps({k: m[k] for k in ("VERSION", "ASSET", "ASSET_URL", "ASSET_SIZE", "ASSET_SHA256")}))' $LoginSource
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned Wrapper Lite release.' }
@@ -117,8 +170,13 @@ function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
     }
 }
 
-$sources = @('Studio.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py',
-    'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py')
+$sources = @('Studio.py', 'apple_download.py', 'download_queue.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py', 'library_cache.py',
+    'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py',
+    'bili_auth.py', 'qr_account_ui.py', 'bili_catalog.py', 'bili_collections.py', 'bili_download.py', 'bili_resume.py',
+    'bili_sidecars.py', 'bili_ui.py',
+    'qq_auth.py', 'qq_catalog.py', 'qq_download.py', 'shared_music.py', 'shared_music_ui.py',
+    'local_convert.py', 'local_convert_ui.py', 'windows_drop.py', 'video_links_ui.py',
+    'youtube_download.py', 'netease_auth.py', 'netease_catalog.py', 'netease_download.py', 'playlist_export.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
 foreach ($path in @($distribution, $buildTools)) {
     [void][IO.Directory]::CreateDirectory($path)
@@ -158,6 +216,8 @@ try {
             Copy-Item -LiteralPath $item.FullName -Destination $runtimeLib
         }
     }
+    # Copy the standard-library parser explicitly. The generic file filter skips cookie files.
+    Copy-Item -LiteralPath (Join-Path $standardLibrary 'http\cookies.py') -Destination (Join-Path $runtimeLib 'http\cookies.py')
     $python = Join-Path $runtime 'python.exe'
 
     $archive = Get-WrapperLiteArchive $python (Join-Path $stage 'login_service.py')
@@ -177,10 +237,12 @@ try {
             throw "Python dependency missing: $file"
         }
     }
-    & $python -I -B -c 'import ssl, sys, tkinter; sys.path.insert(0, sys.argv[1]); import Studio; Studio.configure_windows(); ssl.create_default_context(); tkinter.Tcl()' $stage
-    if ($LASTEXITCODE -ne 0) { throw 'The packaged application could not initialize its TLS and Tcl/Tk runtime.' }
+    Install-QrEncoder $python $lib
+    & $python -I -B -c 'import sqlite3, ssl, sys, tkinter; sys.path.insert(0, sys.argv[1]); import Studio; Studio.configure_windows(); sqlite3.connect(sys.argv[2]).close(); ssl.create_default_context(); tkinter.Tcl()' $stage ':memory:'
+    if ($LASTEXITCODE -ne 0) { throw 'The packaged application could not initialize SQLite, TLS, or Tcl/Tk.' }
 
     $backend = Join-Path $stage 'backend'
+    Install-WebWorker $backend
     $relativeBridge = '_internal\backend\bin\bridge'
     Copy-SafeTree (Join-Path $ApmyxHome $relativeBridge) (Join-Path $backend $relativeBridge)
     $apmyxLicenses = Join-Path $backend 'licenses'
@@ -207,12 +269,12 @@ try {
     $icon = Join-Path $stage 'assets\AMDLStudio.ico'
     if (Test-Path -LiteralPath $icon -PathType Leaf) { $compile += "/win32icon:$icon" }
     & $compiler @compile
-    if ($LASTEXITCODE -ne 0) { throw 'The amdl launcher could not be compiled.' }
+    if ($LASTEXITCODE -ne 0) { throw 'The Media Download Desk launcher could not be compiled.' }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Portable.cmd') -Destination (Join-Path $stage 'Run.cmd')
 
     & $InnoCompiler /Qp "/O$distribution" "/DAppVersion=$Version" "/DPayloadDir=$stage" (Join-Path $PSScriptRoot 'Setup.iss')
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {
-        throw 'The amdl installer could not be compiled.'
+        throw 'The Media Download Desk installer could not be compiled.'
     }
     if (Test-Path -LiteralPath $portable) {
         $resolved = (Resolve-Path -LiteralPath $portable).Path

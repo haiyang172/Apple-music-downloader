@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Setup
@@ -30,7 +30,7 @@ function Get-InstallState {
         }
     }
     foreach ($directory in @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop'))) {
-        foreach ($name in @('amdl.lnk', 'AMDL Studio.lnk')) {
+        foreach ($name in @('影音下载台.lnk', 'amdl.lnk', 'AMDL Studio.lnk')) {
             $path = Join-Path $directory $name
             if (Test-Path -LiteralPath $path -PathType Leaf) {
                 (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
@@ -72,6 +72,8 @@ try {
         (Get-ChildItem -LiteralPath $target -Filter 'unins*')) {
         throw 'Setup did not produce a standalone, unregistered application directory.'
     }
+    $launcher = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $target 'amdl.exe'))
+    if ($launcher.ProductName -cne '影音下载台') { throw 'Setup did not contain the branded launcher.' }
 
     foreach ($name in $environment.Keys) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -81,6 +83,7 @@ try {
     $smokeCode = @'
 from pathlib import Path
 import os
+import shutil
 import ssl
 import subprocess
 import sys
@@ -131,13 +134,74 @@ finally:
     service.close()
 print("Bundled login service started without fetching a component or accessing an account.")
 
+class TestCatalog:
+    def tracks(self, item, region):
+        assert (item["type"], item["id"], region) == ("playlist", "pl.test", "au")
+        return [{"url": f"https://music.apple.com/au/song/{index}", "title": f"Track {index}"}
+                for index in (1, 2, 3)]
+
+
+class TestLogin:
+    def start(self, stop, post):
+        pass
+
+    def status(self):
+        return {"logged_in": True}
+
+    def engine_config(self):
+        return {}
+
+    def close(self):
+        pass
+
+
+class TestEngine:
+    ffmpeg = backend / "tools/ffmpeg.exe"
+
+    def __init__(self, pause_second=False):
+        self.entered_second = threading.Event()
+        self.pause_second = pause_second
+        self.calls = []
+
+    def download(self, config, url, quality, stage, stop, on_event):
+        from engine import Cancelled
+
+        index = int(url.rsplit("/", 1)[-1])
+        self.calls.append(index)
+        if index == 2 and self.pause_second:
+            self.entered_second.set()
+            assert stop.wait(10)
+            raise Cancelled()
+        source = stage / "test.m4a"
+        shutil.copyfile(audio, source)
+        return {"errors": 0, "artifacts": [{"path": str(source), "duration": 0.1,
+                "title": f"Track {index}", "track_id": str(index)}]}
+
+    def close_service(self):
+        pass
+
+
+def new_window():
+    window = tk.Tk()
+    window.withdraw()
+    return window, Studio.Studio(window)
+
+
+def wait_for(window, condition):
+    deadline = time.monotonic() + 15
+    while not condition() and time.monotonic() < deadline:
+        window.update()
+        time.sleep(0.02)
+    assert condition(), "The application did not reach the expected state"
+
+
 Studio.configure_windows()
-window = tk.Tk()
-window.withdraw()
-app = Studio.Studio(window)
+window, app = new_window()
 try:
+    assert window.title() == Studio.APP_TITLE
     assert app.profile_text.get() == "登录" and app.brand_icon.width() >= 32
-    assert int(app.profile_button.grid_info()["row"]) > int(app.navigation["components"].grid_info()["row"])
+    assert app.profile_button.master == app.rail and app.navigation["components"].master == app.nav_content
+    assert int(app.profile_button.grid_info()["row"]) > int(app.nav_canvas.master.grid_info()["row"])
     app.profile_button.invoke()
     assert app.active_page == "account"
     app.show("music")
@@ -157,6 +221,681 @@ try:
 finally:
     app.close()
 print("Isolated installed window loaded Apple Music catalogue and live search.")
+
+
+class PagedCatalog:
+    def __init__(self):
+        self.calls = []
+        self.second_started = threading.Event()
+        self.release_second = threading.Event()
+        self.fail_last = True
+
+    def search_page(self, term, region, kind, cursor):
+        self.calls.append((term, cursor))
+        if term == "new":
+            return self.rows(100, 101), None
+        if cursor == "second":
+            self.second_started.set()
+            assert self.release_second.wait(10)
+            return self.rows(30, 60), "last"
+        if cursor == "last":
+            if self.fail_last:
+                self.fail_last = False
+                raise RuntimeError("Fixture network error")
+            return self.rows(60, 62), None
+        return self.rows(0, 30), "second"
+
+    @staticmethod
+    def rows(start, end):
+        return [{"type": "song", "title": f"Track {index}", "artist": "Fixture",
+                 "url": f"https://music.apple.com/au/song/{index}", "artwork_url": f"art-{index}"}
+                for index in range(start, end)]
+
+
+import music_browser
+art_requests = []
+original_thumbnail = music_browser._thumbnail
+
+
+def count_art(url, pixels):
+    art_requests.append((url, pixels))
+    return b""
+
+
+music_browser._thumbnail = count_art
+window, app = new_window()
+try:
+    window.deiconify()
+    browser = app.music_browser
+    catalogue = PagedCatalog()
+    browser.catalog = catalogue
+    browser.query.set("paged")
+    browser.search()
+    wait_for(window, lambda: len(browser.rows) == 30 and art_requests and not browser.art_busy)
+    assert catalogue.calls == [("paged", None)]
+    assert len(art_requests) < 30 and all(url != "art-29" for url, _ in art_requests)
+    assert all(pixels == round(52 * app.scale) for _, pixels in art_requests)
+    assert not browser.retry_page.winfo_manager()
+
+    browser.sort.choose("#0")
+    selected = browser.tree.get_children()[10]
+    browser.tree.selection_set(selected)
+    browser.tree.yview_moveto(1)
+    wait_for(window, catalogue.second_started.is_set)
+    assert browser.queue_button.instate(("!disabled",))
+    first, _ = browser.tree.yview()
+    anchor = browser.tree.get_children()[round(first * len(browser.rows))]
+    catalogue.release_second.set()
+    wait_for(window, lambda: len(browser.rows) == 60)
+    assert browser.tree.selection() == (selected,)
+    first, _ = browser.tree.yview()
+    assert browser.tree.get_children()[round(first * len(browser.rows))] == anchor
+    assert catalogue.calls == [("paged", None), ("paged", "second")]
+
+    browser.tree.yview_moveto(1)
+    wait_for(window, lambda: browser.page_error)
+    assert len(browser.rows) == 60 and browser.retry_page.winfo_manager()
+    browser.retry_page.invoke()
+    wait_for(window, lambda: len(browser.rows) == 62)
+    assert browser.cursor is None and not browser.retry_page.winfo_manager()
+    assert catalogue.calls[-2:] == [("paged", "last"), ("paged", "last")]
+
+    catalogue.release_second.clear()
+    catalogue.second_started.clear()
+    browser.search()
+    wait_for(window, lambda: len(browser.rows) == 30)
+    browser.tree.yview_moveto(1)
+    wait_for(window, catalogue.second_started.is_set)
+    browser.query.set("new")
+    browser.search()
+    wait_for(window, lambda: any(row["title"] == "Track 100" for row in browser.rows.values()))
+    catalogue.release_second.set()
+    deadline = time.monotonic() + 0.25
+    while time.monotonic() < deadline:
+        window.update()
+        time.sleep(0.02)
+    assert len(browser.rows) == 1
+finally:
+    music_browser._thumbnail = original_thumbnail
+    app.close()
+print("Scrolling fetched pages on demand, retained selection and position, and loaded visible artwork only.")
+
+
+class PagedLibrary:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def items(self, kind, cursor=None, *, limit=100):
+        assert limit == 100
+        library_calls.append((kind, cursor))
+        if library_phase == "cold" and cursor == "page-2" and library_calls.count((kind, cursor)) == 1:
+            raise RuntimeError("Fixture network error")
+        if library_phase != "cold":
+            assert release_library_sync.wait(10)
+            if library_phase == "offline":
+                raise RuntimeError("Fixture offline")
+            return self.rows(1, 71), None
+        if cursor == "page-2":
+            return self.rows(0, 20), "page-3"
+        if cursor == "page-3":
+            return self.rows(20, 30), None
+        return self.rows(30, 70), "page-2"
+
+    @staticmethod
+    def rows(start, end):
+        return [dict(row, duration=index + 60, artwork_url="")
+                for index, row in enumerate(PagedCatalog.rows(start, end), start)]
+
+
+original_library = music_browser.LibraryClient
+library_calls = []
+library_phase = "cold"
+release_library_sync = threading.Event()
+music_browser.LibraryClient = PagedLibrary
+window, app = new_window()
+try:
+    window.deiconify()
+    window.geometry(f"{window.minsize()[0]}x{window.minsize()[1]}")
+    app.library_token = lambda: "test-session"
+    app.show("library")
+    browser = app.library_browser
+    wait_for(window, lambda: len(browser.rows) == 40 and browser.page_error)
+    assert library_calls == [("song", None), ("song", "page-2")]
+    row = browser.tree.get_children()[0]
+    browser.tree.selection_set(row)
+    x, y, width, height = browser.tree.bbox(row, "duration")
+    assert width >= browser.row_font.measure("59:59") and x + width <= browser.tree.winfo_width()
+    browser.sort.choose("#0")
+    assert "同步失败" in browser.status.get()
+    assert app.library_cache.load(browser.library_scope) is None
+    browser.retry_page.invoke()
+    wait_for(window, lambda: len(browser.rows) == 70 and not browser.busy)
+    assert library_calls == [("song", None), ("song", "page-2"), ("song", "page-2"), ("song", "page-3")]
+    order = browser.tree.get_children()
+    assert [browser.rows[item]["title"] for item in order] == [f"Track {index}" for index in range(70)]
+    assert browser.tree.selection() == (row,)
+    browser.sort.choose("#0")
+    assert browser.rows[browser.tree.get_children()[0]]["title"] == "Track 69"
+    assert len(library_calls) == 4
+    snapshot = app.library_cache.load(browser.library_scope)
+    assert len(snapshot) == 70 and snapshot[0]["title"] == "Track 30"
+finally:
+    app.close()
+
+library_phase = "offline"
+window, app = new_window()
+try:
+    window.deiconify()
+    app.library_token = lambda: "test-session"
+    app.show("library")
+    browser = app.library_browser
+    wait_for(window, lambda: len(browser.rows) == 70 and browser.appending)
+    assert browser.busy and len(library_calls) == 5
+    browser.sort.choose("#0")
+    assert browser.rows[browser.tree.get_children()[0]]["title"] == "Track 0"
+    keep = next(row for row, item in browser.rows.items() if item["title"] == "Track 40")
+    browser.tree.selection_set(keep)
+    release_library_sync.set()
+    wait_for(window, lambda: browser.page_error)
+    assert len(browser.rows) == 70 and app.library_cache.load(browser.library_scope) == snapshot
+    library_phase = "changed"
+    browser.retry_page.invoke()
+    wait_for(window, lambda: not browser.busy)
+    assert browser.rows[browser.tree.get_children()[0]]["title"] == "Track 1"
+    assert browser.rows[browser.tree.get_children()[-1]]["title"] == "Track 70"
+    assert browser.tree.selection() == (keep,)
+    assert app.library_cache.load(browser.library_scope)[0]["title"] == "Track 1"
+finally:
+    release_library_sync.set()
+    music_browser.LibraryClient = original_library
+    app.close()
+print("Library saved complete pages, reused cache before network, and kept selection while adding and removing tracks.")
+
+window, app = new_window()
+try:
+    app.catalog = TestCatalog()
+    assert app.queue_music([{"url": "https://music.apple.com/au/song/1", "title": "Track 1",
+                            "batch_key": "catalog:au:playlist:pl.test", "batch_title": "example",
+                            "position": 1}]) == 1
+    assert app.add_link_text("https://music.apple.com/au/playlist/example/pl.test")
+    wait_for(window, lambda: not app.resolving_links)
+    assert [task.position for task in app.tasks.values()] == [1, 2, 3]
+    assert all(task.total == 3 for task in app.tasks.values())
+    app.login_service = TestLogin()
+    app.engine = TestEngine(pause_second=True)
+    app.fields["folder"].set(str(profile))
+    app.fields["category"].set("queue-test")
+    app.fields["native_account"].set(True)
+    app.fields["auto_service"].set(False)
+    app.start_download()
+    wait_for(window, app.engine.entered_second.is_set)
+    app.pause()
+    wait_for(window, lambda: not app.busy)
+    assert [task.state for task in app.tasks.values()] == ["complete", "interrupted", "pending"]
+    assert app.engine.calls == [1, 2]
+    first = app.queue_store.list_tasks()[0]
+    assert Path(first.files[0]).parent == profile / "queue-test"
+    queue_store = app.queue_store
+finally:
+    app.close()
+
+queue_store.set_state(queue_store.list_tasks()[1].id, "running", files=first.files)
+window, app = new_window()
+try:
+    assert [task.state for task in app.tasks.values()] == ["complete", "interrupted", "pending"]
+    app.login_service = TestLogin()
+    app.engine = TestEngine()
+    app.start_download()
+    wait_for(window, lambda: not app.busy)
+    assert app.engine.calls == [2, 3]
+    assert all(task.state == "complete" and Path(task.files[0]).is_file()
+               for task in app.queue_store.list_tasks())
+    alternate = profile / "new-output"
+    alternate.mkdir()
+    app.fields["folder"].set(str(alternate))
+    app.queue_tree.selection_set(str(first.id))
+    app.requeue_selected()
+    repeat = app.queue_store.list_tasks()[-1]
+    assert repeat.id != first.id and repeat.state == "pending"
+    assert app.queue_store.get(first.id).state == "complete"
+    app.start_download()
+    wait_for(window, lambda: not app.busy)
+    repeat = app.queue_store.get(repeat.id)
+    assert repeat.state == "complete" and Path(repeat.files[0]).parent == alternate / "queue-test"
+finally:
+    app.close()
+print("Playlist positions, restart recovery, completed-track skipping, and new output settings passed.")
+
+import apple_download
+from bili_auth import BiliAccount, BiliSession, QRLogin
+import bili_catalog
+import bili_collections
+import bili_download
+import bili_resume
+from io import BytesIO
+from unittest.mock import patch
+
+original_parts = bili_catalog._fetch_parts
+original_metadata = bili_catalog._fetch_video_metadata
+original_bili_download = apple_download.download_video
+original_danmaku = apple_download.save_danmaku
+original_subtitle = apple_download.save_subtitle
+session = BiliSession((("SESSDATA", "fixture-account-session"),))
+parts_calls = []
+
+
+def fixture_parts(video_id, sess=None):
+    parts_calls.append((video_id, sess))
+    return [
+    {"page": 1, "cid": 101, "part": "Part One", "duration": 35},
+    {"page": 2, "cid": 102, "part": "演唱：周杰伦｜【纯享版】《夜曲》", "duration": 60},
+    ]
+
+
+bili_catalog._fetch_parts = fixture_parts
+bili_catalog._fetch_video_metadata = lambda _: {"title": "公开演出合集", "uploader": "投稿者测试", "source_category": "音乐"}
+bili_calls = []
+
+
+def fixture_bili_download(url, mode, stage, ffmpeg, stop, on_status, *, session=None, checkpoint=None, check_volume=None):
+    assert stage.parent == checkpoint and checkpoint.parent == profile / ".amdl-downloads"
+    check_volume()
+    bili_calls.append((url, mode, session))
+    on_status("Fixture audio")
+    return Path(shutil.copyfile(audio, stage / "fixture.m4a"))
+
+
+def fixture_danmaku(url, stage, stop, on_status):
+    target = stage / "fixture.ass"
+    target.write_text("[Script Info]\nScriptType: v4.00+\n", encoding="utf-8")
+    return target
+
+
+def fixture_subtitle(url, stage, stop, on_status, *, session=None):
+    assert url.endswith("?p=2") and session is not None
+    target = stage / "fixture.srt"
+    target.write_text("1\n00:00:00,100 --> 00:00:01,000\n测试字幕\n\n", encoding="utf-8")
+    return target
+
+
+apple_download.download_video = fixture_bili_download
+apple_download.save_danmaku = fixture_danmaku
+apple_download.save_subtitle = fixture_subtitle
+window, app = new_window()
+try:
+    app.fields["native_account"].set(False)
+    app.fields["auto_service"].set(False)
+    app.fields["folder"].set(str(profile))
+    app.fields["category"].set("")
+    app.bili_format.set(Studio.BILI_FORMATS["audio"])
+    app.fields["bili_danmaku"].set(True)
+    app.fields["bili_subtitle"].set(True)
+    app.show("bilibili")
+    browser = app.bili_browser
+    account = browser.account
+    fixture_url = "https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=" + "1" * 32
+    with patch.object(app.bili_auth, "begin", return_value=QRLogin(fixture_url, "1" * 32)):
+        account.open()
+        wait_for(window, lambda: hasattr(account, "image"))
+        assert account.image.width() >= 100
+        account.receive(account.serial, "signed_in", (session, BiliAccount(1, "Fixture account")))
+        assert app.bili_auth.load() == session
+        assert b"fixture-account-session" not in app.bili_auth.path.read_bytes()
+        account.close()
+    browser.link.set("BV1GJ411x7h7")
+    browser.resolve()
+    wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
+    assert browser.caption.get() == "公开演出合集"
+    assert browser.metadata.get() == "投稿者测试  ·  音乐"
+    track_row = browser.tree.get_children()[1]
+    assert browser.tree.set(track_row, "title") == "夜曲 · 周杰伦"
+    app.bili_format.set(Studio.BILI_FORMATS["video"])
+    assert "《夜曲》" in browser.tree.set(track_row, "title")
+    app.bili_format.set(Studio.BILI_FORMATS["audio"])
+    assert bili_catalog.clean_song_title("《三体》解说") == ""
+    browser.tree.selection_set(track_row)
+    browser.queue_selected()
+    task, = [task for task in app.tasks.values() if task.source == "bilibili"]
+    assert (task.position, task.total, task.audio_title, task.artist) == (2, 2, "夜曲", "周杰伦")
+    assert (task.uploader, task.source_category, task.media_category) == ("投稿者测试", "音乐", "music")
+    app.show_download_source("bilibili")
+    assert app.active_page == "download" and app.queue_tree.get_children() == (str(task.id),)
+    assert not app.quality_box.winfo_manager() and app.bili_format_box.winfo_manager()
+    app.show_download_source(Studio.SOURCE)
+    assert str(task.id) not in app.queue_tree.get_children() and app.quality_box.winfo_manager()
+    app.show_download_source("all")
+    assert str(task.id) in app.queue_tree.get_children()
+    app.show_download_source("bilibili")
+    app.start_download()
+    wait_for(window, lambda: not app.busy)
+    task = app.queue_store.get(task.id)
+    assert task.state == "complete" and Path(task.files[0]).parent == profile / "音乐"
+    assert Path(task.files[0]).name == "周杰伦 - 夜曲.m4a"
+    tags = mutagen.File(task.files[0]).tags
+    assert tags["\xa9nam"] == ["夜曲"] and tags["\xa9ART"] == ["周杰伦"]
+    assert Path(task.files[1]) == Path(task.files[0]).with_suffix(".ass")
+    assert Path(task.files[2]) == Path(task.files[0]).with_suffix(".srt")
+    assert not any((profile / ".amdl-downloads").iterdir())
+    assert parts_calls == [("BV1GJ411x7h7", session)]
+    assert bili_calls == [("https://www.bilibili.com/video/BV1GJ411x7h7?p=2", "audio", session)]
+    playlist = profile / "驾车.m3u8"
+    app.queue_tree.selection_set(str(task.id))
+    with patch.object(Studio.filedialog, "asksaveasfilename", return_value=str(playlist)):
+        app.export_queue_playlist()
+    playlist_lines = playlist.read_text(encoding="utf-8").splitlines()
+    assert playlist_lines[0] == "#EXTM3U" and playlist_lines[-1] == "音乐/周杰伦 - 夜曲.m4a"
+
+    collection = "https://space.bilibili.com/517327498/lists/3993361?type=season"
+    collection_result = {"title": "测试合集", "collection_kind": "season", "rows": [
+        {"source": "bilibili", "title": "测试视频", "url": "https://www.bilibili.com/video/BV1GJ411x7h7?p=1",
+         "position": 4, "total": 12, "duration": 35, "batch_key": "bilibili:collection:3993361", "batch_title": "测试合集"},
+    ]}
+    with patch.object(bili_collections, "resolve_collection", return_value=collection_result):
+        assert app.add_link_text(collection)
+        wait_for(window, lambda: len(browser.rows) == 1 and not browser.busy)
+    row, = browser.tree.get_children()
+    assert browser.tree.item(row, "values")[0] in (4, "4")
+    browser.open_parts()
+    wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
+    assert browser.back_button.winfo_manager() and "/video/" in browser.link.get()
+    browser.back()
+    assert browser.caption.get() == "测试合集" and browser.link.get() == collection
+    browser.queue_all()
+    collection_task, = [item for item in app.tasks.values() if item.batch_title == "测试合集"]
+    assert (collection_task.position, collection_task.total) == (4, 12) and collection_task.url.endswith("?p=1")
+finally:
+    apple_download.download_video = original_bili_download
+    apple_download.save_danmaku = original_danmaku
+    apple_download.save_subtitle = original_subtitle
+    bili_catalog._fetch_parts = original_parts
+    bili_catalog._fetch_video_metadata = original_metadata
+    app.bili_auth.clear()
+    app.close()
+print("Bilibili QR, encrypted session, song metadata, ASS/SRT publishing, and collection navigation passed.")
+
+ffmpeg = backend / "tools/ffmpeg.exe"
+fragment = profile / "fixture-flac.m4s"
+subprocess.run([str(ffmpeg), "-v", "error", "-i", str(profile / "local-test.flac"), "-c:a", "copy",
+                "-strict", "experimental", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", str(fragment)],
+               check=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+flac_cdn = "https://cdn.bilivideo.com/track.m4s"
+flac_manifest = {"flac": {"audio": {"codecs": "fLaC", "mimeType": "audio/mp4", "baseUrl": flac_cdn}}}
+
+class MediaFixture(BytesIO):
+    from email.message import Message
+    status = 200
+    headers = Message()
+    headers["Content-Type"] = "audio/mp4"
+    headers["Content-Length"] = str(fragment.stat().st_size)
+
+flac_stage = profile / "flac-stage"
+flac_stage.mkdir()
+with patch.object(bili_download, "resolve_video", return_value={"rows": [{"cid": 101}]}), \
+     patch.object(bili_download, "_playback", return_value=flac_manifest), \
+     patch.object(bili_download, "_open", return_value=MediaFixture(fragment.read_bytes())) as cdn:
+    flac_path = bili_download.download_video("https://www.bilibili.com/video/BV1GJ411x7h7?p=1", "flac", flac_stage,
+                                             ffmpeg, threading.Event(), lambda _: None, session=session)
+    assert cdn.call_args.args[0] == flac_cdn and "Cookie" not in cdn.call_args.kwargs
+assert mutagen.File(flac_path).info.md5_signature == mutagen.File(profile / "local-test.flac").info.md5_signature
+try:
+    bili_download._select_flac({"flac": {"display": True, "audio": None}})
+except RuntimeError as error:
+    assert "原始 FLAC" in str(error)
+else:
+    raise AssertionError("Missing original FLAC must not fall back to AAC")
+print("Bilibili original FLAC remux and unavailable-format handling passed.")
+
+fixture_bytes = fragment.read_bytes()
+half = len(fixture_bytes) // 2
+pause = threading.Event()
+requests = []
+
+class ResumeFixture(MediaFixture):
+    status = 206
+
+    def __init__(self, offset):
+        self.offset = offset
+        super().__init__(fixture_bytes[offset:])
+        self.headers = self.Message()
+        self.headers["Content-Type"] = "audio/mp4"
+        self.headers["Content-Length"] = str(len(fixture_bytes) - offset)
+        self.headers["Content-Range"] = f"bytes {offset}-{len(fixture_bytes) - 1}/{len(fixture_bytes)}"
+        self.headers["ETag"] = '"flac-fixture-v1"'
+
+    def read(self, size=-1):
+        if self.offset == 0:
+            pause.set()
+            return super().read(half)
+        return super().read(size)
+
+def resumable_cdn(url, referer, **headers):
+    assert url == flac_cdn and "Cookie" not in headers
+    requests.append(headers)
+    return ResumeFixture(int(headers["Range"].split("=")[1].split("-")[0]))
+
+checkpoint = profile / "resume-fixture"
+stage1 = profile / "resume-1"
+stage2 = profile / "resume-2"
+stage1.mkdir()
+stage2.mkdir()
+with patch.object(bili_download, "resolve_video", return_value={"rows": [{"cid": 101}]}), \
+     patch.object(bili_download, "_playback", return_value=flac_manifest), \
+     patch.object(bili_download, "_open", side_effect=resumable_cdn):
+    try:
+        bili_download.download_video("https://www.bilibili.com/video/BV1GJ411x7h7?p=1", "flac", stage1,
+                                     ffmpeg, pause, lambda _: None, checkpoint=checkpoint)
+    except bili_download.Cancelled:
+        assert not any(stage1.iterdir()) and (checkpoint / "audio.m4s.part").stat().st_size == half
+    else:
+        raise AssertionError("Pausing should persist a verified prefix")
+    resumed = bili_download.download_video("https://www.bilibili.com/video/BV1GJ411x7h7?p=1", "flac", stage2,
+                                            ffmpeg, threading.Event(), lambda _: None, checkpoint=checkpoint)
+assert [headers["Range"] for headers in requests] == ["bytes=0-", f"bytes={half}-"]
+assert requests[1]["If-Range"] == '"flac-fixture-v1"'
+assert mutagen.File(resumed).info.md5_signature == mutagen.File(flac_path).info.md5_signature
+bili_resume.forget_resume(checkpoint)
+assert not checkpoint.exists()
+print("Bilibili persistent range resume, checksummed media, and checkpoint cleanup passed.")
+
+import shared_music
+import shared_music_ui
+import video_links_ui
+import youtube_download
+import qq_catalog
+import netease_catalog
+from netease_auth import NeteaseAccount, NeteaseSession
+from qq_auth import QqAccount, QqQR, QqSession
+from types import SimpleNamespace
+
+window, app = new_window()
+try:
+    url = "https://y.qq.com/n/ryqq_v2/playlist/9505357778"
+    result = {"source": "qq", "title": "Public Playlist", "url": url, "total": 5, "rows": [
+        {"position": 1, "title": "=Fixture", "artist": "Artist", "album": "Album", "duration": 90,
+         "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"},
+    ]}
+    with patch.object(qq_catalog, "resolve_public_qq", return_value=result):
+        assert app.add_link_text(url)
+        browser = app.shared_music_browsers["qq"]
+        wait_for(window, lambda: len(browser.rows) == 1 and not browser.busy)
+    assert app.active_page == "qq" and "1 / 5" in browser.count.get()
+    assert "部分" in browser.status.get()
+    output = profile / "shared-music.csv"
+    with patch.object(shared_music_ui.filedialog, "asksaveasfilename", return_value=str(output)):
+        browser.export_csv()
+    assert "'=Fixture" in output.read_text(encoding="utf-8-sig")
+
+    account = browser.account
+    qq_session = QqSession("fixture1234", "isolated-fixture-qq-session", "Fixture account")
+    login_image = QqQR((root / "assets/amdl-32.png").read_bytes(), "fixture-signature")
+    collection = {"id": "42", "dir_id": 0, "kind": "created", "title": "QQ 测试歌单", "total": 1, "url": url}
+    with patch.object(account.auth, "begin", return_value=login_image), \
+         patch.object(qq_catalog, "list_playlists", return_value={"rows": [collection]}) as my_playlists:
+        account.open()
+        wait_for(window, lambda: hasattr(account, "image"))
+        assert account.image.width() >= 100
+        account.receive(account.serial, "signed_in", (qq_session, QqAccount(qq_session.musicid, "Fixture account")))
+        wait_for(window, lambda: browser.view == "library" and not browser.busy)
+        assert my_playlists.call_args.args == (qq_session,)
+        assert account.auth.load() == qq_session
+        assert b"isolated-fixture-qq-session" not in account.auth.path.read_bytes()
+        account.close()
+
+    qq_song = result["rows"][0]["url"]
+    qq_playlist_result = dict(result, title=collection["title"], total=1, rows=[
+        dict(result["rows"][0], title="QQ Fixture"),
+    ])
+    with patch.object(qq_catalog, "resolve_playlist", return_value=qq_playlist_result) as tracks:
+        browser._open_selected()
+        wait_for(window, lambda: browser.view == "tracks" and len(browser.rows) == 1 and not browser.busy)
+        assert tracks.call_args.args[0] == qq_session
+        assert tracks.call_args.args[1]["id"] == collection["id"]
+    browser.library_button.invoke()
+    assert browser.view == "library"
+    with patch.object(qq_catalog, "resolve_playlist", return_value=qq_playlist_result):
+        browser._open_selected()
+        wait_for(window, lambda: browser.view == "tracks" and len(browser.rows) == 1 and not browser.busy)
+
+    def qq_fixture(url, stage, ffmpeg, stop, on_status, *, session, expected_duration=None):
+        assert url == qq_song and session == qq_session and expected_duration == 90
+        return Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))
+
+    app.fields["folder"].set(str(profile))
+    app.fields["category"].set("")
+    with patch.object(apple_download, "download_qq", side_effect=qq_fixture):
+        browser._enqueue(True)
+        wait_for(window, lambda: not app.busy)
+    qq_task, = [task for task in app.queue_store.list_tasks() if task.source == "qq"]
+    assert qq_task.state == "complete" and Path(qq_task.files[0]).name == "Artist - QQ Fixture.mp3"
+    account.logout()
+    assert not browser.rows and account.session is None and account.auth.load() is None
+
+    netease_url = "https://music.163.com/playlist?id=3778678"
+    netease_song = "https://music.163.com/song?id=1973665667"
+    netease_result = dict(result, source="netease", url=netease_url, rows=[
+        dict(result["rows"][0], title="NetEase Fixture", url=netease_song),
+    ])
+    with patch.object(shared_music, "resolve_music", return_value=netease_result):
+        assert app.add_link_text(netease_url)
+        wait_for(window, lambda: len(app.shared_music_browsers["netease"].rows) == 1)
+    assert app.active_page == "netease"
+
+    app.fields["folder"].set(str(profile))
+    app.fields["category"].set("")
+    netease = app.shared_music_browsers["netease"]
+    netease._enqueue(False, all_rows=True)
+    song, = [task for task in app.tasks.values() if task.source == "netease"]
+    assert (song.url, song.position, song.total, song.duration) == (netease_song, 1, 5, 90)
+
+    def netease_fixture(url, stage, ffmpeg, stop, on_status, *, session=None, expected_duration=None):
+        assert url == netease_song and expected_duration == 90 and session is None
+        return Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))
+
+    with patch.object(apple_download, "download_netease", side_effect=netease_fixture):
+        netease._enqueue(True)
+        wait_for(window, lambda: not app.busy)
+    song = app.queue_store.get(song.id)
+    assert song.state == "complete" and Path(song.files[0]).name == "Artist - NetEase Fixture.mp3"
+
+    netease_account = netease.account
+    netease_session = NeteaseSession(12345, (("MUSIC_U", "isolated-fixture-netease-cookie"),))
+    netease_qr = SimpleNamespace(url="https://music.163.com/login?codekey=fixture")
+    my_netease_playlist = {"id": "1234", "title": "网易云测试歌单", "kind": "liked", "total": 1, "url": ""}
+    with patch.object(netease_account.auth, "begin", return_value=netease_qr), \
+         patch.object(netease_catalog, "list_playlists", return_value={"rows": [my_netease_playlist]}) as netease_list:
+        netease_account.open()
+        wait_for(window, lambda: hasattr(netease_account, "image"))
+        netease_account.receive(netease_account.serial, "signed_in", (netease_session, NeteaseAccount(12345, "网易云测试")))
+        wait_for(window, lambda: netease.view == "library" and not netease.busy)
+        assert netease_list.call_args.args == (netease_session,)
+        assert netease_account.auth.load() == netease_session
+        assert b"isolated-fixture-netease-cookie" not in netease_account.auth.path.read_bytes()
+        netease_account.close()
+
+    private_netease = dict(netease_result, title=my_netease_playlist["title"], url="", total=1, rows=[
+        dict(netease_result["rows"][0], title="NetEase Private Fixture"),
+    ])
+    with patch.object(netease_catalog, "resolve_playlist", return_value=private_netease) as netease_reads:
+        netease._open_selected()
+        wait_for(window, lambda: netease.view == "tracks" and len(netease.rows) == 1 and not netease.busy)
+        assert netease_reads.call_args.args[0] == netease_session
+    with patch.object(apple_download, "download_netease", return_value=profile / "local-test.mp3") as netease_download:
+        netease._enqueue(True)
+        wait_for(window, lambda: not app.busy)
+        netease_download.assert_called_once()
+        assert netease_download.call_args.kwargs["session"] == netease_session
+    assert any(item.source == "netease" and item.title == "NetEase Private Fixture" and item.state == "complete"
+               for item in app.queue_store.list_tasks())
+    netease_account.logout()
+    assert not netease.rows and netease_account.auth.load() is None
+
+    youtube_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    youtube_row = {"source": "youtube", "title": "YouTube Fixture", "artist": "Channel", "url": youtube_url}
+    with patch.object(youtube_download, "resolve_youtube", return_value={"title": youtube_row["title"], "rows": [youtube_row]}):
+        assert app.add_link_text("https://youtu.be/jNQXAC9IVRw")
+        youtube = app.video_link_pages["youtube"]
+        youtube.resolve()
+        wait_for(window, lambda: len(youtube.rows) == 1 and not youtube.busy)
+    app.youtube_format.set(Studio.YOUTUBE_FORMATS["audio"])
+
+    def youtube_fixture(url, mode, stage, ffmpeg, stop, on_status):
+        assert url == youtube_url and mode == "audio"
+        return Path(shutil.copyfile(audio, stage / "fixture.m4a"))
+
+    with patch.object(apple_download, "download_youtube", side_effect=youtube_fixture):
+        youtube._enqueue(True)
+        wait_for(window, lambda: not app.busy)
+    video, = [task for task in app.queue_store.list_tasks() if task.source == "youtube"]
+    assert video.state == "complete" and video.options["youtube_mode"] == "audio"
+    assert Path(video.files[0]).name == "YouTube Fixture.m4a" and app.youtube_format_box.winfo_manager()
+    assert not app.quality_box.winfo_manager() and not app.bili_format_box.winfo_manager()
+
+    with patch.object(video_links_ui.webbrowser, "open") as opened:
+        assert app.add_link_text("https://youtu.be/dQw4w9WgXcQ") and app.active_page == "youtube"
+        assert app.add_link_text("https://www.douyin.com/video/7431386431445384474") and app.active_page == "douyin"
+        opened.assert_not_called()
+    with patch.object(app.local_converter, "choose_files") as choose:
+        app.video_link_pages["douyin"].import_saved()
+        choose.assert_called_once_with()
+        assert app.active_page == "local"
+finally:
+    app.close()
+print("Shared playlist routing, CSV export, QQ and NetEase QR sessions, personal playlists, and download queue passed.")
+
+web = backend / "web"
+for command, version in (
+    ([sys.executable, "-I", str(web / "yt-dlp.pyz"), "--ignore-config", "--version"], b"2026.10.26"),
+    ([str(web / "qjs.exe"), "--version"], b"0.18.0"),
+):
+    completed = subprocess.run(command, capture_output=True, check=True, timeout=20,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+    assert version in completed.stdout + completed.stderr
+print("Bundled YouTube tools, source filters, and YouTube/NetEase queue output passed.")
+
+window, app = new_window()
+try:
+    local_input = profile / "原始音轨.m4a"
+    shutil.copyfile(audio, local_input)
+    original = local_input.read_bytes()
+    app.fields["native_account"].set(False)
+    app.fields["auto_service"].set(False)
+    converter = app.local_converter
+    with patch.object(converter, "quick_actions") as popup:
+        app.on_file_drop([str(local_input)])
+        popup.assert_called_once_with()
+    assert app.active_page == "local"
+    assert "MP4" not in converter.format_box.cget("values")
+    converter.format.set("MP3")
+    converter.start()
+    wait_for(window, lambda: not app.busy)
+    task, = [item for item in app.queue_store.list_tasks() if item.source == "local"]
+    assert task.state == "complete" and app.selected_queue_source() == "local"
+    output, = map(Path, task.files)
+    assert output == local_input.with_suffix(".mp3") and mutagen.File(output).info.length > 0
+    assert local_input.read_bytes() == original
+finally:
+    app.close()
+print("Local drop routing, format selection, offline conversion, and original-file preservation passed.")
 '@
     $smokeScript = Join-Path $testRoot 'smoke.py'
     [IO.File]::WriteAllText($smokeScript, $smokeCode, [Text.UTF8Encoding]::new($false))

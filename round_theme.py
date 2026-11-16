@@ -20,6 +20,47 @@ def _photo(window, width, height, scanlines):
     return tk.PhotoImage(master=window, data=png, format="png")
 
 
+def sidebar_badge(window, glyph, size, color, radius):
+    """Place a transparent icon on a rounded badge that works on any rail state."""
+    rgb = tuple(value >> 8 for value in window.winfo_rgb(color))
+
+    def pixel(x, y):
+        distance = math.hypot(max(radius - x, x - size + radius, 0),
+                              max(radius - y, y - size + radius, 0))
+        return bytes((*rgb, round(255 * max(0, min(1, radius + 0.5 - distance)))))
+
+    rows = (b"\0" + b"".join(pixel(x + 0.5, y + 0.5) for x in range(size)) for y in range(size))
+    image = _photo(window, size, size, b"".join(rows))
+    x = (size - glyph.width()) // 2
+    y = (size - glyph.height()) // 2
+    image.tk.call(str(image), "copy", str(glyph), "-to", x, y, "-compositingrule", "overlay")
+    return image
+
+
+def music_placeholder(window, size, kind):
+    """Build a compact fallback tile for a song, album or playlist."""
+    fill, ink = (("#dcefe9", "#297362") if kind == "song" else
+                 ("#e8edf5", "#526981") if kind == "album" else ("#e4efe8", "#4b775e"))
+    fill, ink = (tuple(value >> 8 for value in window.winfo_rgb(color)) for color in (fill, ink))
+
+    def pixel(x, y):
+        if kind == "album":
+            distance = math.hypot(x - 16, y - 16)
+            marked = 6 < distance < 7.7 or distance < 2.0
+        elif kind == "playlist":
+            marked = 9 <= x <= 23 and any(abs(y - line) < 0.9 for line in (11, 16, 21))
+        else:
+            marked = ((x - 12) ** 2 / 3.5 ** 2 + (y - 21) ** 2 / 2.8 ** 2 <= 1 or
+                      14 <= x <= 16 and 10 <= y <= 21 or 16 < x <= 22 and abs(y - (x - 16) / 2 - 10) < 1)
+        radius = 6
+        distance = math.hypot(max(radius - x, x - 32 + radius, 0), max(radius - y, y - 32 + radius, 0))
+        return bytes((*(ink if marked else fill), round(255 * max(0, min(1, radius + 0.5 - distance)))))
+
+    rows = (b"\0" + b"".join(pixel((x + 0.5) * 32 / size, (y + 0.5) * 32 / size) for x in range(size))
+            for y in range(size))
+    return _photo(window, size, size, b"".join(rows))
+
+
 def _round_image(window, radius, fill, stroke, stroke_width, tile_size, backdrop):
     seam = radius + 1
     size = 2 * seam + tile_size
@@ -152,18 +193,22 @@ def install(style, window, scale, *, bg, panel, ink, muted, accent, border,
     selected = blend(panel, accent, 0.13)
     button("Selected.TButton", selected, blend(border, accent, 0.26), accent,
            blend(panel, accent, 0.18), blend(panel, accent, 0.24), bg, accent)
+    for name, fill, foreground in (("MusicFilter.TButton", panel, muted),
+                                   ("MusicFilterActive.TButton", selected, accent)):
+        button(name, fill, None, foreground, blend(panel, accent, 0.10), blend(panel, accent, 0.17),
+               panel, accent, padding=(round(10 * scale), round(4 * scale)), backdrop=panel)
 
     for name, fill, foreground in (
-        ("Nav.TButton", nav, "white"),
-        ("NavActive.TButton", nav_active, "white"),
-        ("Account.TButton", nav_account, "white"),
-        ("AccountActive.TButton", nav_active, "white"),
+        ("Nav.TButton", nav, muted),
+        ("NavActive.TButton", nav_active, accent),
+        ("Account.TButton", nav_account, ink),
+        ("AccountActive.TButton", nav_active, ink),
         ("AccountSignedIn.TButton", nav_account, nav_signed_in),
         ("AccountSignedInActive.TButton", nav_active, nav_signed_in),
     ):
-        button(name, fill, None, foreground, blend(fill, nav_signed_in, 0.1),
-               blend(fill, nav, 0.24), blend(fill, nav, 0.5), nav_signed_in,
-               radius=10, anchor="w", padding=(round(11 * scale), round(8 * scale)), backdrop=nav)
+        button(name, fill, None, foreground, blend(fill, accent, 0.08),
+               blend(fill, accent, 0.14), blend(fill, nav, 0.5), accent,
+               radius=10, anchor="w", padding=(round(9 * scale), round(6 * scale)), backdrop=nav)
 
     fields = (
         (("disabled",), blend(panel, bg, 0.63), border, 1),
@@ -191,5 +236,8 @@ def install(style, window, scale, *, bg, panel, ink, muted, accent, border,
     card = surface("amdl.Card.border", 16, (panel, border), minimum=False)
     style.layout("Card.TFrame", [(card, {"sticky": "nswe"})])
     style.configure("Card.TFrame", background=panel)
+    rail = surface("amdl.Rail.border", 16, (nav, border), minimum=False)
+    style.layout("Rail.TFrame", [(rail, {"sticky": "nswe"})])
+    style.configure("Rail.TFrame", background=nav)
     window._amdl_round_assets = images
     return images

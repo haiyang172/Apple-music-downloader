@@ -1,4 +1,4 @@
-"""Publish verified audio to a selected folder without replacing existing files."""
+"""Publish media and attachments without replacing existing files."""
 
 import ctypes
 import hashlib
@@ -16,7 +16,7 @@ _DEVICE = re.compile(
     r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])",
     re.IGNORECASE,
 )
-_AUDIO_EXTENSIONS = {".m4a", ".flac", ".mp3", ".wav", ".opus"}
+_MEDIA_EXTENSIONS = {".m4a", ".flac", ".mp3", ".wav", ".opus", ".mp4", ".mkv", ".webm", ".ass", ".srt"}
 
 
 def clean_name(text, limit=80):
@@ -101,6 +101,29 @@ def volume_identity(path):
     return (mount.casefold(), info.st_dev)
 
 
+def download_cache(folder, name, expected_volume, *, create=False):
+    """Find the task's partial-file directory on the original output volume."""
+    if re.fullmatch(r"[a-z0-9-]+", name) is None:
+        raise ValueError("无效的下载缓存目录。")
+    folder = _absolute(folder)
+    root = folder / ".amdl-downloads"
+    directory = root / name
+
+    def check_volume():
+        _plain_directory(folder)
+        if volume_identity(folder) != expected_volume:
+            raise OSError("原保存磁盘尚未连接。请接回原磁盘后继续。")
+
+    check_volume()
+    if create:
+        for path in (root, directory):
+            path.mkdir(exist_ok=True)
+            _plain_directory(path)
+    else:
+        _plain_directory(directory)
+    return directory, check_volume
+
+
 def _digest(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -120,11 +143,11 @@ def _names(stem, track_id, extension):
 
 
 def publish(source, destination, stem, track_id, *, expected_volume=None):
-    """Return (path, newly_written) after copying an already verified audio file."""
+    """Return (path, newly_written) after copying a verified media file."""
     source = Path(source)
     source_info = source.lstat()
     extension = source.suffix.lower()
-    if extension not in _AUDIO_EXTENSIONS or _is_link(source_info) or not stat.S_ISREG(source_info.st_mode) or source_info.st_size == 0:
+    if extension not in _MEDIA_EXTENSIONS or _is_link(source_info) or not stat.S_ISREG(source_info.st_mode) or source_info.st_size == 0:
         raise ValueError(f"下载文件无效：{source}")
 
     destination = _absolute(destination)

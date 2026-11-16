@@ -1,17 +1,18 @@
-#ifndef AppVersion
-  #define AppVersion "0.3.2"
+﻿#ifndef AppVersion
+  #define AppVersion "0.3.19"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "dist\amdl"
 #endif
 #define StudioAppId "amdl.desktop"
+#define StudioAppName "影音下载台"
 
 [Setup]
 AppId={{74870839-527C-4C3D-A869-AB8A60913829}
-AppName=amdl
+AppName={#StudioAppName}
 AppVersion={#AppVersion}
 DefaultDirName={localappdata}\Programs\amdl
-DefaultGroupName=amdl
+DefaultGroupName={#StudioAppName}
 DisableProgramGroupPage=yes
 DisableStartupPrompt=yes
 UninstallDisplayIcon={app}\amdl.exe
@@ -20,11 +21,11 @@ ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.19041
 OutputDir=dist
-OutputBaseFilename=amdl-setup
+OutputBaseFilename=MediaDownloadDesk-Setup
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern dynamic
-UsePreviousTasks=no
+UsePreviousTasks=not IsExtractMode
 UsePreviousAppDir=not IsExtractMode
 UsePreviousGroup=not IsExtractMode
 Uninstallable=not IsExtractMode
@@ -47,13 +48,15 @@ Name: "desktopicon"; Description: "{cm:DesktopIcon}"; Flags: unchecked
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
+Type: files; Name: "{autoprograms}\amdl.lnk"; Check: not IsExtractMode
+Type: files; Name: "{autodesktop}\amdl.lnk"; Check: not IsExtractMode
 Type: files; Name: "{autoprograms}\AMDL Studio.lnk"; Check: not IsExtractMode
 Type: files; Name: "{autodesktop}\AMDL Studio.lnk"; Check: not IsExtractMode
 Type: files; Name: "{app}\AMDLStudio.exe"; Check: not IsExtractMode
 
 [Icons]
-Name: "{autoprograms}\amdl"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Check: not IsExtractMode
-Name: "{autodesktop}\amdl"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon; Check: not IsExtractMode
+Name: "{autoprograms}\{#StudioAppName}"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Check: not IsExtractMode
+Name: "{autodesktop}\{#StudioAppName}"; Filename: "{app}\amdl.exe"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon; Check: not IsExtractMode
 
 [Run]
 Filename: "{app}\amdl.exe"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsExtractMode
@@ -61,8 +64,8 @@ Filename: "{app}\amdl.exe"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}
 [CustomMessages]
 zhcn.DesktopIcon=创建桌面快捷方式
 english.DesktopIcon=Create a desktop shortcut
-zhcn.LaunchStudio=打开 amdl
-english.LaunchStudio=Open amdl
+zhcn.LaunchStudio=打开{#StudioAppName}
+english.LaunchStudio=Open Media Download Desk
 
 [Code]
 function IsExtractMode: Boolean;

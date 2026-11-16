@@ -1,9 +1,9 @@
 """Read-only browsing of an Apple Music user's cloud library."""
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from music_catalog import CatalogClient, CatalogError, catalog_row
+from music_catalog import CatalogClient, CatalogError, artwork_url, catalog_row
 
 
 LIBRARY_TYPES = {
@@ -28,23 +28,6 @@ def _string(value):
 def _data(value):
     items = value.get("data") if isinstance(value, dict) else None
     return items if isinstance(items, list) else []
-
-
-def _artwork(attributes):
-    artwork = attributes.get("artwork")
-    if not isinstance(artwork, dict) or not isinstance(artwork.get("url"), str):
-        return ""
-    value = artwork["url"].replace("{w}", "48").replace("{h}", "48").replace("{f}", "png")
-    value = re.sub(r"\.(?:jpe?g|webp)(?=\?|$)", ".png", value, flags=re.IGNORECASE)
-    try:
-        parsed = urlsplit(value)
-        host = parsed.hostname or ""
-        if (parsed.scheme == "https" and host.endswith(".mzstatic.com") and parsed.port is None
-                and not parsed.username and not parsed.password):
-            return value
-    except ValueError:
-        pass
-    return ""
 
 
 def _library_row(resource, storefront):
@@ -91,7 +74,7 @@ def _library_row(resource, storefront):
         "album": _string(attributes.get("albumName")) or catalog.get("album", ""),
         "duration": duration or catalog.get("duration", 0),
         "url": url,
-        "artwork_url": _artwork(attributes) or catalog.get("artwork_url", ""),
+        "artwork_url": artwork_url(attributes.get("artwork")) or catalog.get("artwork_url", ""),
         "preview_url": catalog.get("preview_url", ""),
         "storefront": storefront,
         "library_id": identifier,
@@ -135,11 +118,14 @@ class LibraryClient:
             raise
 
     def _page(self, endpoint, cursor, limit):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("资料库每页应请求 1 到 100 条。")
         if cursor:
-            response = self._request(_cursor_path(cursor, endpoint))
+            target = urlsplit(_cursor_path(cursor, endpoint))
+            if not any(key == "limit" for key, _ in parse_qsl(target.query, keep_blank_values=True)):
+                target = target._replace(query=target.query + "&" + urlencode({"limit": limit}))
+            response = self._request(target.geturl())
         else:
-            if type(limit) is not int or not 1 <= limit <= 100:
-                raise ValueError("资料库每页应请求 1 到 100 条。")
             response = self._request(endpoint, {"limit": limit, "include": "catalog"})
         if not isinstance(response, dict) or not isinstance(response.get("data"), list):
             raise RuntimeError("Apple Music 返回的资料库数据无效。")
@@ -147,7 +133,7 @@ class LibraryClient:
         next_page = response.get("next")
         return rows, _cursor_path(next_page, endpoint) if next_page else None
 
-    def items(self, kind="song", cursor=None, *, limit=50):
+    def items(self, kind="song", cursor=None, *, limit=100):
         if kind not in LIBRARY_TYPES:
             raise ValueError("请选择资料库中的歌曲、专辑或歌单。")
         return self._page(f"{LIBRARY_BASE}/{LIBRARY_TYPES[kind][8:]}", cursor, limit)

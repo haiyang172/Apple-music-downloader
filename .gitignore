@@ -12,6 +12,8 @@ __pycache__/
 /installer/dist/
 /installer/.tools/
 /installer/build/
+/installer/.stage-*/
+.amdl-downloads/
 *.exe
 *.dll
 *.msi
@@ -20,8 +22,12 @@ __pycache__/
 *.tar.*
 *.log
 *.m4a
+*.aac
 *.flac
 *.mp3
+*.mp4
+*.mkv
+*.webm
 *.wav
 *.opus
 *.eac3
@@ -30,5 +36,8 @@ __pycache__/
 *.qcow2
 *.vhdx
 .env*
+*-session.dat
+*.sqlite3
+*.sqlite3-*
 config.yaml
 settings.json
