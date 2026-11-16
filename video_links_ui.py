@@ -11,6 +11,20 @@ from share_links import links_in_text
 
 
 SOURCES = {"youtube": "YouTube", "douyin": "抖音"}
+_WEB_ACCOUNTS = {
+    "youtube": (
+        "https://www.youtube.com/",
+        "打开 YouTube 网页",
+        "在 YouTube 网页右上角选择「登录」，用 Google 账号继续。",
+        "订阅、观看记录和私密播放列表在网页中访问。下载台可查找公开作品。",
+    ),
+    "douyin": (
+        "https://www.douyin.com/",
+        "打开抖音网页",
+        "在抖音网页右上角选择「登录」，按网页提示扫码或验证。",
+        "收藏和关注在网页中访问。通过抖音保存作品后，可在下载台导入影音文件。",
+    ),
+}
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
 _YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 _YOUTUBE_LIST = re.compile(r"[A-Za-z0-9_-]{2,120}")
@@ -113,12 +127,17 @@ class VideoLinkPage:
         name = SOURCES[source]
 
         page.columnconfigure(0, weight=1)
-        app.label(page, name, large=True, background=app.background).grid(row=0, column=0, sticky="w")
+        header = ttk.Frame(page, style="Surface.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        app.label(header, name, large=True, background=app.background).grid(row=0, column=0, sticky="w")
         if source == "youtube":
-            self.format = ttk.Combobox(page, textvariable=app.youtube_format, values=tuple(formats), width=15,
+            self.format = ttk.Combobox(header, textvariable=app.youtube_format, values=tuple(formats), width=15,
                                        state="readonly", style="Surface.TCombobox")
-            self.format.grid(row=0, column=0, sticky="e")
+            self.format.grid(row=0, column=1, padx=(8, 0))
             self.format.bind("<<ComboboxSelected>>", app.quality_changed)
+        self.account_button = app.action(header, "账户", lambda: app.show(f"{source}_account"))
+        self.account_button.grid(row=0, column=2, padx=(8, 0))
         card = app.panel(page, padding=(round(16 * app.scale), round(14 * app.scale)))
         card.grid(row=1, column=0, sticky="ew", pady=(round(12 * app.scale), 0))
         card.columnconfigure(0, weight=1)
@@ -137,6 +156,34 @@ class VideoLinkPage:
             app.action(card, "导入已保存文件", self.import_saved).grid(row=1, column=2, padx=(6, 0), pady=(8, 0))
         self.link.trace_add("write", self._update_link)
         self._update_link()
+
+    def build_account_page(self, page):
+        app, source = self.app, self.source
+        _, button_text, steps, features = _WEB_ACCOUNTS[source]
+        name = SOURCES[source]
+        page.columnconfigure(0, weight=1)
+        header = ttk.Frame(page, style="Surface.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        app.label(header, f"{name} 账户", large=True, background=app.background).grid(row=0, column=0, sticky="w")
+        self.account_back_button = app.action(header, f"返回{name}", lambda: app.show(source))
+        self.account_back_button.grid(row=0, column=1, padx=(8, 0))
+
+        card = app.panel(page, padding=(round(16 * app.scale), round(14 * app.scale)))
+        card.grid(row=1, column=0, sticky="ew", pady=(round(12 * app.scale), 0))
+        card.columnconfigure(0, weight=1)
+        wrap = round(425 * app.scale)
+        app.label(card, steps, wrap=wrap).grid(row=0, column=0, sticky="w")
+        app.label(card, features, muted=True, wrap=wrap).grid(row=1, column=0, sticky="w", pady=(5, 12))
+        self.browser_account_button = app.action(card, button_text, self.open_account, primary=True)
+        self.browser_account_button.grid(row=2, column=0, sticky="w")
+        self.account_status = tk.StringVar(page)
+        ttk.Label(card, textvariable=self.account_status, style="MusicStatus.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(7, 0)
+        )
+
+    def open_account(self):
+        self._open_in_browser(_WEB_ACCOUNTS[self.source][0], self.account_status, "请在浏览器完成登录。")
 
     def _update_link(self, *_):
         value = self.link.get().strip()
@@ -173,16 +220,17 @@ class VideoLinkPage:
             if item:
                 result = _parse_video_link(item["url"])
                 url = result[1] if result and result[0] == "youtube" else ""
+        success = "保存后可导入文件" if self.source == "douyin" else "已在浏览器打开"
+        self._open_in_browser(url, self.status, success)
+        return "break"
+
+    def _open_in_browser(self, url, status, success):
         if not self.app.closing and url:
             try:
                 opened = webbrowser.open(url)
             except (OSError, webbrowser.Error):
                 opened = False
-            if opened:
-                self.status.set("保存后可导入文件" if self.source == "douyin" else "已在浏览器打开")
-            else:
-                self.status.set("无法打开默认浏览器。")
-        return "break"
+            status.set(success if opened else "无法打开默认浏览器。")
 
     def import_saved(self):
         if self.app.closing:

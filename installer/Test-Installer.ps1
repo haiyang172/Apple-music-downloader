@@ -236,10 +236,27 @@ try:
     app.navigation["music"].invoke()
     app.music_browser.library_tab.invoke()
     assert app.active_page == "library" and app.navigation["music"].cget("style") == "NavActive.TButton"
+    app.library_browser.account_tab.invoke()
+    assert app.active_page == "account" and app.navigation["music"].cget("style") == "NavActive.TButton"
+    app.apple_account_back.invoke()
+    assert app.active_page == "library"
     app.library_browser.browse_tab.invoke()
     assert app.active_page == "music"
     app.profile_button.invoke()
     assert app.active_page == "account"
+    app.apple_account_back.invoke()
+    assert app.active_page == "music"
+    for source, address in (("youtube", "https://www.youtube.com/"), ("douyin", "https://www.douyin.com/")):
+        app.show(source)
+        video = app.video_link_pages[source]
+        video.account_button.invoke()
+        assert app.active_page == Studio.ACCOUNT_PAGES[source]
+        assert app.navigation[source].cget("style") == "NavActive.TButton"
+        with patch.object(Studio.webbrowser, "open", return_value=True) as official_browser:
+            video.browser_account_button.invoke()
+            official_browser.assert_called_once_with(address)
+        video.account_back_button.invoke()
+        assert app.active_page == source
     app.show("music")
     browser = app.music_browser
     deadline = time.monotonic() + 30
@@ -701,13 +718,25 @@ try:
     account = browser.account
     fixture_url = "https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=" + "1" * 32
     with patch.object(app.bili_auth, "begin", return_value=QRLogin(fixture_url, "1" * 32)):
-        account.open()
-        wait_for(window, lambda: hasattr(account, "image"))
+        account.button.invoke()
+        assert app.active_page == "bilibili_account" and account.page is app.pages["bilibili_account"]
+        wait_for(window, lambda: account.image is not None)
+        scan_serial, scan_stop = account.serial, account.stop
+        app.navigation["qq"].invoke()
+        assert scan_stop.is_set() and account.image is None and app.active_page == "qq"
+        account.receive(scan_serial, "signed_in", (session, BiliAccount(1, "Stale login")))
+        assert account.session is None and app.bili_auth.load() is None
+        app.show("bilibili")
+        app.profile_button.invoke()
+        assert app.active_page == "bilibili_account"
+        wait_for(window, lambda: account.image is not None)
         assert account.image.width() >= 100
         account.receive(account.serial, "signed_in", (session, BiliAccount(1, "Fixture account")))
         assert app.bili_auth.load() == session
         assert b"fixture-account-session" not in app.bili_auth.path.read_bytes()
-        account.close()
+        assert app.profile_button.cget("style") == "AccountSignedInActive.TButton"
+        account.back_button.invoke()
+        assert app.active_page == "bilibili"
     browser.link.set("【哔哩哔哩】分享作品 https://www.bilibili.com/video/BV1GJ411x7h7）。")
     browser.resolve()
     wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
@@ -967,14 +996,16 @@ try:
     with patch.object(account.auth, "begin", return_value=login_image), \
          patch.object(qq_catalog, "list_playlists", return_value={"rows": [collection]}) as my_playlists:
         account.open()
-        wait_for(window, lambda: hasattr(account, "image"))
+        assert app.active_page == "qq_account"
+        wait_for(window, lambda: account.image is not None)
         assert account.image.width() >= 100
         account.receive(account.serial, "signed_in", (qq_session, QqAccount(qq_session.musicid, "Fixture account")))
         wait_for(window, lambda: browser.view == "library" and not browser.busy)
         assert my_playlists.call_args.args == (qq_session,)
         assert account.auth.load() == qq_session
         assert b"isolated-fixture-qq-session" not in account.auth.path.read_bytes()
-        account.close()
+        account.back_button.invoke()
+        assert app.active_page == "qq"
 
     qq_song = result["rows"][0]["url"]
     qq_playlist_result = dict(result, title=collection["title"], total=1, rows=[
@@ -1059,13 +1090,15 @@ try:
     with patch.object(netease_account.auth, "begin", return_value=netease_qr), \
          patch.object(netease_catalog, "list_playlists", return_value={"rows": [my_netease_playlist]}) as netease_list:
         netease_account.open()
-        wait_for(window, lambda: hasattr(netease_account, "image"))
+        assert app.active_page == "netease_account"
+        wait_for(window, lambda: netease_account.image is not None)
         netease_account.receive(netease_account.serial, "signed_in", (netease_session, NeteaseAccount(12345, "网易云测试")))
         wait_for(window, lambda: netease.view == "library" and not netease.busy)
         assert netease_list.call_args.args == (netease_session,)
         assert netease_account.auth.load() == netease_session
         assert b"isolated-fixture-netease-cookie" not in netease_account.auth.path.read_bytes()
-        netease_account.close()
+        netease_account.back_button.invoke()
+        assert app.active_page == "netease"
 
     private_netease = dict(netease_result, title=my_netease_playlist["title"], url="", total=1, rows=[
         dict(netease_result["rows"][0], title="NetEase Private Fixture"),

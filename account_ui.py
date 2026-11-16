@@ -13,15 +13,22 @@ import settings
 
 def build_account_page(app):
     page = app.pages["account"]
-    page.rowconfigure(0, weight=1)
+    header = ttk.Frame(page, style="Surface.TFrame")
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(0, weight=1)
+    app.label(header, "Apple Music 账户", large=True, background=app.background).grid(row=0, column=0, sticky="w")
+    app.apple_account_back = app.action(header, "返回", lambda: app.show(app.apple_account_return))
+    app.apple_account_back.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+    page.rowconfigure(1, weight=1)
     content = ttk.Frame(page, style="Surface.TFrame")
-    content.grid(row=0, column=0)
+    content.grid(row=1, column=0, pady=(10, 0))
     content.columnconfigure(0, weight=1, minsize=round(368 * app.scale))
 
     form = app.panel(content, padding=(24, 22))
     form.grid(row=0, column=0, sticky="ew")
     form.columnconfigure(0, weight=1)
-    app.label(form, "Apple Music 下载账户", large=True).grid(row=0, column=0, sticky="w")
+    ttk.Label(form, text="下载账户", style="MusicTitle.TLabel").grid(row=0, column=0, sticky="w")
     app.label(form, variable=app.account_status, muted=True, wrap=330).grid(
         row=1, column=0, sticky="w", pady=(4, 0)
     )

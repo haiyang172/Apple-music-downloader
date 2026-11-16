@@ -290,6 +290,8 @@ class MusicBrowser:
         self.library_tab = ttk.Button(tabs, text="资料库", command=lambda: app.show("library"),
                                       style="MusicTabActive.TButton" if private else "MusicTab.TButton")
         self.library_tab.grid(row=0, column=1, padx=(round(3 * app.scale), 0))
+        self.account_tab = ttk.Button(tabs, text="账户", command=lambda: app.show("account"), style="MusicTab.TButton")
+        self.account_tab.grid(row=0, column=2, padx=(round(3 * app.scale), 0))
         self.query = tk.StringVar(page)
         if private:
             actions = ttk.Frame(bar, style="Surface.TFrame")

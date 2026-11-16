@@ -68,6 +68,9 @@ PAGES = {"music": "Apple Music", "library": "Apple 资料库", "bilibili": "B �
          "youtube": "YouTube", "douyin": "抖音", "download": "下载队列", "local": "本地转码",
          "account": "账户", "settings": "设置", "components": "组件"}
 PLATFORM_PAGES = ("music", "bilibili", "qq", "netease", "youtube", "douyin")
+ACCOUNT_PAGES = {source: ("account" if source == "music" else f"{source}_account") for source in PLATFORM_PAGES}
+ACCOUNT_SOURCES = {page: source for source, page in ACCOUNT_PAGES.items()}
+PROFILE_NAMES = {"bilibili": "B 站", "qq": "QQ 音乐", "netease": "网易云", "youtube": "YouTube", "douyin": "抖音"}
 TOOL_PAGES = ("download", "local", "settings", "components")
 BG = "#eff5f2"
 PANEL = "#ffffff"
@@ -170,6 +173,9 @@ class Studio:
         self.queue_source = tk.StringVar(window, QUEUE_SOURCES["all"])
         self.account_status = tk.StringVar(window)
         self.profile_text = tk.StringVar(window, "登录")
+        self.apple_profile_text = tk.StringVar(window, "登录")
+        self.profile_source = "music"
+        self.apple_account_return = "music"
         self.profile_connected = False
         self.path_summary = tk.StringVar(window)
         self.status = tk.StringVar(window, load_error or (f"已恢复 {recovered} 项中断任务" if recovered else "就绪"))
@@ -210,7 +216,7 @@ class Studio:
         stage.grid(row=0, column=1, sticky="nsew")
         stage.columnconfigure(0, weight=1)
         stage.rowconfigure(0, weight=1)
-        for key in PAGES:
+        for key in dict.fromkeys((*PAGES, *ACCOUNT_PAGES.values())):
             page = tk.Frame(stage, background=BG, padx=24, pady=19)
             page.grid(row=0, column=0, sticky="nsew")
             page.columnconfigure(0, weight=1)
@@ -221,8 +227,14 @@ class Studio:
         self.bili_browser = BiliBrowser(self, self.pages["bilibili"], BILI_FORMATS)
         self.shared_music_browsers = {source: SharedMusicBrowser(self, self.pages[source], source=source)
                                       for source in ("qq", "netease")}
+        self.qr_accounts = {"bilibili": self.bili_browser.account,
+                            **{source: browser.account for source, browser in self.shared_music_browsers.items()}}
+        for account in self.qr_accounts.values():
+            account.label.trace_add("write", self.update_profile_style)
         self.video_link_pages = {source: VideoLinkPage(self, self.pages[source], source, YOUTUBE_FORMATS.values())
                                  for source in ("youtube", "douyin")}
+        for source, browser in self.video_link_pages.items():
+            browser.build_account_page(self.pages[ACCOUNT_PAGES[source]])
         self.local_converter = LocalConverter(self, self.pages["local"])
         self.drop_cleanup = None
         self.make_download()
@@ -297,7 +309,7 @@ class Studio:
             self.navigation[key] = button
 
         self.profile_button = ttk.Button(
-            self.rail, textvariable=self.profile_text, command=lambda: self.show("account"),
+            self.rail, textvariable=self.profile_text, command=self.open_platform_account,
             style="Account.TButton", compound="left", cursor="hand2", takefocus=True,
         )
         self.profile_button.grid(row=2, column=0, sticky="ew")
@@ -357,7 +369,11 @@ class Studio:
         inset = round(10 * scale)
         gap = round(7 * scale)
         brand_size = round(32 * scale)
-        width = max(round(144 * scale), brand_size + self.brand_font.measure(APP_TITLE) + gap + 2 * inset + 4)
+        profile_width = max(self.brand_font.measure(f"{PROFILE_NAMES[source]} · {suffix}")
+                            for source, suffix in (("bilibili", "已登录"), ("qq", "已登录"), ("netease", "已登录"),
+                                                   ("youtube", "账户"), ("douyin", "账户")))
+        width = max(round(144 * scale), brand_size + self.brand_font.measure(APP_TITLE) + gap + 2 * inset + 4,
+                    profile_width + round(46 * scale) + 2 * inset)
         self.rail.configure(width=width)
         self.rail.grid_configure(padx=(inset, 0), pady=inset)
         self.brand.grid_configure(padx=inset, pady=(round(13 * scale), round(15 * scale)))
@@ -1101,11 +1117,19 @@ class Studio:
         self.action(buttons, "启动服务", self.start_service).pack(side="left", padx=7)
 
     def show(self, page):
-        if page != self.active_page and self.preview_owner is not None:
-            self.stop_preview()
+        if page != self.active_page:
+            if page == "account":
+                self.apple_account_return = "library" if self.active_page == "library" else "music"
+            previous_account = self.qr_accounts.get(ACCOUNT_SOURCES.get(self.active_page))
+            if previous_account is not None:
+                previous_account.leave()
+            if self.preview_owner is not None:
+                self.stop_preview()
         self.active_page = page
         self.pages[page].tkraise()
-        nav_page = "music" if page == "library" else page
+        nav_page = ACCOUNT_SOURCES.get(page, "music" if page == "library" else page)
+        if nav_page in ACCOUNT_PAGES:
+            self.profile_source = nav_page
         self._reveal_nav(self.navigation[nav_page])
         for key, button in self.navigation.items():
             if key != "account":
@@ -1121,9 +1145,28 @@ class Studio:
             elif not self.preferences.get("native_account") and not self.preferences.get("session"):
                 self.user_entry.focus_set()
 
-    def update_profile_style(self):
-        name = "AccountSignedIn" if self.profile_connected else "Account"
-        if self.active_page == "account":
+    def open_platform_account(self):
+        source = self.profile_source
+        account = self.qr_accounts.get(source)
+        if account is not None:
+            account.open()
+        else:
+            self.show(ACCOUNT_PAGES[source])
+
+    def update_profile_style(self, *_):
+        source = self.profile_source
+        account = self.qr_accounts.get(source)
+        if source == "music":
+            connected, caption = self.profile_connected, self.apple_profile_text.get()
+        elif account is not None:
+            connected = account.session is not None
+            caption = f"{PROFILE_NAMES[source]} · {'已登录' if connected else '登录'}"
+        else:
+            connected = False
+            caption = f"{PROFILE_NAMES[source]} · 账户"
+        self.profile_text.set(caption)
+        name = "AccountSignedIn" if connected else "Account"
+        if self.active_page == ACCOUNT_PAGES[source]:
             name += "Active"
         self.profile_button.configure(style=name + ".TButton")
 
@@ -1239,7 +1282,7 @@ class Studio:
         else:
             self.account_status.set("请登录 Apple Music")
             caption = "登录"
-        self.profile_text.set("处理中" if self.auth_busy else caption)
+        self.apple_profile_text.set("处理中" if self.auth_busy else caption)
         self.profile_connected = signed_in or bool(legacy)
         self.update_profile_style()
         self.logout_button.configure(state="normal" if not self.auth_busy and (remembered or legacy) else "disabled")
