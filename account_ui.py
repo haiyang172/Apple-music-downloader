@@ -1,8 +1,14 @@
-"""The account page and the modal Apple Music verification prompt."""
+"""Apple Music download login and library connection dialogs."""
 
+from queue import Empty, SimpleQueue
 import re
+import threading
 import tkinter as tk
 from tkinter import ttk
+import webbrowser
+
+from music_library import LibraryClient, LibrarySessionRequired
+import settings
 
 
 def build_account_page(app):
@@ -15,7 +21,7 @@ def build_account_page(app):
     form = app.panel(content, padding=(24, 22))
     form.grid(row=0, column=0, sticky="ew")
     form.columnconfigure(0, weight=1)
-    app.label(form, "登录 Apple Music", large=True).grid(row=0, column=0, sticky="w")
+    app.label(form, "Apple Music 下载账户", large=True).grid(row=0, column=0, sticky="w")
     app.label(form, variable=app.account_status, muted=True, wrap=330).grid(
         row=1, column=0, sticky="w", pady=(4, 0)
     )
@@ -49,8 +55,32 @@ def build_account_page(app):
     app.logout_button = app.action(actions, "退出登录", app.logout_account)
     app.logout_button.pack(side="right")
 
+    library = app.panel(content, padding=(15, 12))
+    library.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    library.columnconfigure(0, weight=1)
+    app.label(library, "Apple Music 资料库").grid(row=0, column=0, sticky="w")
+    library_status = tk.StringVar(library)
+    app.label(library, variable=library_status, muted=True).grid(row=1, column=0, sticky="w", pady=(3, 0))
+    library_action = app.action(library, "连接资料库", app.connect_library)
+    library_action.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
+    reconnect = app.action(library, "重新连接", app.connect_library)
+    reconnect.grid(row=0, column=2, rowspan=2, sticky="e", padx=(5, 0))
+
+    def update_library_access(*_):
+        saved = bool(app.preferences.get("session"))
+        library_status.set("网页会话已保存" if saved else "等待连接")
+        if saved:
+            library_action.configure(text="查看资料库", command=lambda: app.show("library"))
+            reconnect.grid()
+        else:
+            library_action.configure(text="连接资料库", command=app.connect_library)
+            reconnect.grid_remove()
+
+    update_library_access()
+    app.account_status.trace_add("write", update_library_access)
+
     app.legacy_card = app.panel(content, padding=(15, 12))
-    app.legacy_card.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    app.legacy_card.grid(row=3, column=0, sticky="ew", pady=(10, 0))
     app.legacy_card.columnconfigure(0, weight=1)
     app.label(app.legacy_card, "兼容会话令牌").grid(row=0, column=0, sticky="w", pady=(0, 4))
     ttk.Entry(app.legacy_card, textvariable=app.token, show="•").grid(
@@ -60,6 +90,120 @@ def build_account_page(app):
         row=2, column=0, sticky="w", pady=(8, 0)
     )
     app.legacy_card.grid_remove()
+
+
+def show_library_connection(app):
+    """Open the existing-token connection for the Apple Music library."""
+    dialog = getattr(app, "library_connection_dialog", None)
+    if dialog is None or not dialog.window.winfo_exists():
+        app.library_connection_dialog = LibraryConnectionDialog(app)
+    else:
+        dialog.window.lift()
+
+
+class LibraryConnectionDialog:
+    def __init__(self, app):
+        self.app = app
+        self._result = SimpleQueue()
+        self._poll = None
+        self._closing = False
+
+        self.window = window = tk.Toplevel(app.window, background=app.background)
+        window.title("连接 Apple Music 资料库")
+        window.transient(app.window)
+        window.resizable(False, False)
+        window.protocol("WM_DELETE_WINDOW", self._dismiss)
+        window.bind("<Escape>", self._dismiss)
+        window.bind("<Return>", self._connect)
+
+        self.token = tk.StringVar(window)
+        self.status = tk.StringVar(window)
+        card = app.panel(window, padding=(20, 16))
+        card.pack(fill="both", expand=True, padx=12, pady=12)
+        card.columnconfigure(0, weight=1, minsize=round(333 * app.scale))
+        app.label(card, "连接资料库", large=True).grid(row=0, column=0, sticky="w")
+        app.label(card, "输入你要连接的 Apple Music 账户的 Music User Token。", muted=True, wrap=330).grid(
+            row=1, column=0, sticky="w", pady=(6, 10)
+        )
+        self.entry = ttk.Entry(card, textvariable=self.token, show="•", width=42)
+        self.entry.grid(row=2, column=0, sticky="ew")
+        app.label(card, variable=self.status, muted=True, wrap=330).grid(row=3, column=0, sticky="w", pady=(7, 0))
+        actions = ttk.Frame(card, style="Card.TFrame")
+        actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        app.action(actions, "打开 Apple Music", lambda: webbrowser.open("https://music.apple.com/")).pack(side="left")
+        self.submit = app.action(actions, "连接", self._connect, primary=True)
+        self.submit.pack(side="right")
+        app.action(actions, "取消", self._dismiss).pack(side="right", padx=(5, 7))
+
+        window.grab_set()
+        self.entry.focus_set()
+
+    def _connect(self, _event=None):
+        if self._closing or self._poll is not None or self.app.closing:
+            return "break"
+        token = self.token.get().strip()
+        if not re.fullmatch(r"[\x21-\x7e]{50,8192}", token):
+            self.status.set("请输入完整的 Music User Token。")
+            self.entry.focus_set()
+            return "break"
+        preferences = self.app.preferences
+        previous = (preferences.get("session"), preferences.get("native_account"))
+        region = self.app.catalog_region()
+        catalog = self.app.catalog
+        self.entry.configure(state="disabled")
+        self.submit.configure(state="disabled", text="验证中…")
+        self.status.set("正在验证 Apple Music 资料库权限…")
+        self._poll = self.window.after(70, self._receive)
+        threading.Thread(target=self._verify, args=(token, region, catalog, previous), daemon=True).start()
+        return "break"
+
+    def _verify(self, token, region, catalog, previous):
+        try:
+            LibraryClient(token, region, catalog=catalog).items(limit=1)
+            protected = settings.protect_session(token)
+        except LibrarySessionRequired:
+            self._result.put((None, "Apple Music 未接受此资料库会话，请确认令牌仍有效。", previous))
+        except (OSError, RuntimeError, ValueError) as error:
+            self._result.put((None, str(error), previous))
+        else:
+            self._result.put((protected, "", previous))
+
+    def _receive(self):
+        self._poll = None
+        if self._closing or self.app.closing:
+            return
+        try:
+            protected, error, previous = self._result.get_nowait()
+        except Empty:
+            self._poll = self.window.after(70, self._receive)
+            return
+        if protected is not None:
+            preferences = self.app.preferences
+            if previous != (preferences.get("session"), preferences.get("native_account")):
+                error = "Apple Music 连接状态已变化，请重新验证。"
+            else:
+                try:
+                    self.app.store({**preferences, "session": protected})
+                except (OSError, RuntimeError, ValueError) as failure:
+                    error = str(failure)
+                else:
+                    self._dismiss()
+                    self.app.show("library")
+                    return
+        self.status.set(error or "暂时无法验证资料库会话，请重试。")
+        self.entry.configure(state="normal")
+        self.submit.configure(state="normal", text="连接")
+        self.entry.focus_set()
+
+    def _dismiss(self, _event=None):
+        self._closing = True
+        if self._poll is not None:
+            self.window.after_cancel(self._poll)
+            self._poll = None
+        self.token.set("")
+        self.window.destroy()
+        self.app.library_connection_dialog = None
+        return "break"
 
 
 class VerificationDialog:

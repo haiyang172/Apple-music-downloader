@@ -1,4 +1,4 @@
-"""Browse shared music links and queue eligible tracks."""
+"""Search songs, browse shared links, and queue tracks."""
 
 import csv
 import threading
@@ -48,6 +48,7 @@ class SharedMusicBrowser:
         self.catalog = CATALOGS.get(source)
         self.serial = 0
         self.busy = False
+        self.appending = False
         self.stop = threading.Event()
         self.rows = {}
         self.source = ""
@@ -57,7 +58,11 @@ class SharedMusicBrowser:
         self.private_view = False
         self.library = None
         self.library_position = None
-        self.link_hint = f"粘贴{SOURCES[source]}歌曲或歌单链接" if source else ""
+        self.search_query = ""
+        self.next_search_offset = None
+        self.search_warning = ""
+        self.search_urls = set()
+        self.link_hint = "搜索歌曲，或粘贴歌曲、歌单链接" if source else ""
         self.link = tk.StringVar(page, self.link_hint)
         self.caption = tk.StringVar(page, "曲目")
         self.status = tk.StringVar(page)
@@ -82,7 +87,7 @@ class SharedMusicBrowser:
         if source is not None:
             self.entry.bind("<FocusIn>", self._clear_link_hint)
             self.entry.bind("<FocusOut>", self._restore_link_hint)
-        self.resolve_button = app.action(bar, "读取曲目", self.resolve, primary=True)
+        self.resolve_button = app.action(bar, "查找" if source else "读取曲目", self.resolve, primary=True)
         self.resolve_button.grid(row=2, column=1, padx=(8, 0))
         if self.catalog is not None:
             self.library_button = app.action(bar, "我的歌单", self.read_library)
@@ -137,9 +142,9 @@ class SharedMusicBrowser:
         self.tree.bind("<Configure>", self._fit_columns, add="+")
         self.tree.bind("<Return>", self._open_selected)
         self.tree.bind("<Double-1>", self._open_clicked)
-        scrollbar = ttk.Scrollbar(card, command=self.tree.yview, style="Music.Vertical.TScrollbar")
-        scrollbar.grid(row=1, column=1, sticky="ns", padx=(round(5 * app.scale), 0))
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(card, command=self.tree.yview, style="Music.Vertical.TScrollbar")
+        self.scrollbar.grid(row=1, column=1, sticky="ns", padx=(round(5 * app.scale), 0))
+        self.tree.configure(yscrollcommand=self._scroll_changed)
 
         foot = ttk.Frame(card, style="MusicToolbar.TFrame")
         foot.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(7, 0))
@@ -147,6 +152,7 @@ class SharedMusicBrowser:
             side="left", fill="x", expand=True, padx=(3, 8)
         )
         ttk.Label(foot, textvariable=self.count, style="MusicStatus.TLabel").pack(side="right", padx=(0, 3))
+        self.retry_button = app.action(foot, "重试", self._load_next_search_page)
         self._update_actions()
 
     def _fit_columns(self, event):
@@ -165,15 +171,19 @@ class SharedMusicBrowser:
             self.link.set(self.link_hint)
 
     def resolve(self, _event=None):
-        if self.busy or self.app.closing:
+        if self._opening or self.app.closing:
             return "break"
         value = self.link.get().strip()
         if not value or value == self.link_hint:
-            self.status.set(f"请先{self.link_hint}。" if self.page_source else "请先粘贴音乐链接。")
+            self.status.set("请输入歌名或链接。" if self.page_source else "请先粘贴音乐链接。")
             self.entry.focus_set()
             return "break"
-        if self.page_source and shared_music.shared_music_source(value) != self.page_source:
-            self.status.set(f"请{self.link_hint}。")
+        link_source = shared_music.shared_music_source(value)
+        if self.catalog is not None and not link_source and "://" not in value and not value.startswith("www."):
+            self._search(value)
+            return "break"
+        if self.page_source and link_source != self.page_source:
+            self.status.set(f"请粘贴{SOURCES[self.page_source]}的歌曲或歌单链接。")
             return "break"
 
         if self.page_source == "qq":
@@ -182,6 +192,32 @@ class SharedMusicBrowser:
         else:
             self._read(lambda _stop: shared_music.resolve_music(value), "正在读取公开曲目…")
         return "break"
+
+    @property
+    def _opening(self):
+        return self.busy and not self.appending
+
+    def _search(self, query, offset=0):
+        session = self.account.session
+
+        def fetch(stop):
+            result = self.catalog.search_songs(query, session=session, stop=stop, offset=offset)
+            return dict(result, view="search", query=query, offset=offset)
+
+        self._read(fetch, "正在加载更多歌曲…" if offset else "正在搜索歌曲…", append=bool(offset))
+
+    def _scroll_changed(self, first, last):
+        self.scrollbar.set(first, last)
+        if (float(last) >= 0.95 and not self.search_warning and self.tree.winfo_viewable()
+                and self.app.active_page == self.page_source):
+            self._load_next_search_page()
+
+    def _load_next_search_page(self):
+        if self.busy or self.app.closing or self.view != "search" or self.next_search_offset is None:
+            return
+        self.search_warning = ""
+        self.retry_button.pack_forget()
+        self._search(self.search_query, self.next_search_offset)
 
     def _account_changed(self, session):
         self.library = None
@@ -192,14 +228,14 @@ class SharedMusicBrowser:
         elif session is None and self.private_view:
             self.stop.set()
             self.serial += 1
-            self.busy = self.private_view = False
+            self.busy = self.appending = self.private_view = False
             self.resolve_button.configure(state="normal")
             self.library_button.configure(state="normal", text="我的歌单")
             self._reset()
             self._update_actions()
 
     def read_library(self):
-        if self.busy or self.app.closing:
+        if self._opening or self.app.closing:
             return
         session = self.account.session
         if session is None:
@@ -237,22 +273,29 @@ class SharedMusicBrowser:
         self.tree.delete(*self.tree.get_children())
         self.source = self.collection_url = ""
         self.total = None
+        self.search_query = ""
+        self.next_search_offset = None
+        self.search_warning = ""
+        self.search_urls.clear()
+        self.retry_button.pack_forget()
         self.view = "tracks"
         self.caption.set("曲目")
         self.count.set("")
         self.status.set("")
 
-    def _read(self, fetch, status, *, private=False):
+    def _read(self, fetch, status, *, private=False, append=False):
         self.serial += 1
         serial = self.serial
         self.stop.set()
         self.stop = stop = threading.Event()
         self.busy = True
+        self.appending = append
         self.private_view = private
-        self.resolve_button.configure(state="disabled")
-        if self.catalog is not None:
-            self.library_button.configure(state="disabled")
-        self._reset()
+        if not append:
+            self.resolve_button.configure(state="disabled")
+            if self.catalog is not None:
+                self.library_button.configure(state="disabled")
+            self._reset()
         self.status.set(status)
         self._update_actions()
 
@@ -277,24 +320,33 @@ class SharedMusicBrowser:
     def receive(self, serial, result, error):
         if serial != self.serial or self.app.closing:
             return
-        self.busy = False
+        append = self.appending
+        self.busy = self.appending = False
         self.resolve_button.configure(state="normal")
         if self.catalog is not None:
             self.library_button.configure(state="normal")
         if error:
             self.status.set(error)
+            if append:
+                self.search_warning = error
+                self.retry_button.pack(side="right", padx=(0, 8))
         else:
-            self._show(result)
+            self._show(result, append=append)
         self._update_actions()
 
-    def _show(self, result):
-        self._reset()
-        self.source = result["source"]
-        self.view = result.get("view", "tracks")
-        self.collection_url = _official_url(result.get("url"), self.source)
-        self.total = result.get("total")
-        self.caption.set(result["title"] if self.page_source else f"{SOURCES[self.source]} · {result['title']}")
+    def _show(self, result, *, append=False):
+        if not append:
+            self._reset()
+            self.source = result["source"]
+            self.view = result.get("view", "tracks")
+            self.collection_url = _official_url(result.get("url"), self.source)
+            self.caption.set(result["title"] if self.page_source else f"{SOURCES[self.source]} · {result['title']}")
+        if result.get("total") is not None or not append:
+            self.total = result.get("total")
         library = self.view == "library"
+        search = self.view == "search"
+        if search:
+            self.search_query = result["query"]
         if library:
             self.library = result
         for column, label in (("title", "歌单" if library else "歌曲"), ("artist", "类型" if library else "艺人"),
@@ -302,7 +354,15 @@ class SharedMusicBrowser:
             if label != self.sort.headings[column]:
                 self.sort.set_heading(column, label)
         kinds = {"liked": "我喜欢", "created": "创建", "collected": "收藏"}
+        order = self.tree.get_children() if append and self.sort.column else ()
+        anchor = order[min(len(order) - 1, round(self.tree.yview()[0] * len(order)))] if order else ""
+        previous_count = len(self.rows)
         for position, item in enumerate(result["rows"], 1):
+            if search:
+                url = _official_url(item.get("url"), self.source)
+                if not url or url in self.search_urls:
+                    continue
+                self.search_urls.add(url)
             if library:
                 item = dict(item, position=position, artist=kinds.get(item.get("kind"), ""), duration=item.get("total"))
                 duration = item["duration"] if item["duration"] is not None else "—"
@@ -311,11 +371,20 @@ class SharedMusicBrowser:
             row = self.tree.insert("", "end", values=(item.get("position") or "—", item["title"],
                                                       item.get("artist") or "—", duration))
             self.rows[row] = item
-        if len(self.rows) == 1:
+        if len(self.rows) == 1 and not append:
             self.tree.selection_set(next(iter(self.rows)))
         self.sort.apply()
+        if anchor:
+            self.tree.see(anchor)
         count, total = len(self.rows), self.total
-        if library:
+        if search:
+            next_offset = result.get("next_offset")
+            progressed = type(next_offset) is int and next_offset > result["offset"] and count > previous_count
+            self.next_search_offset = next_offset if progressed else None
+            self.count.set(f"已显示 {count} / {total} 首" if self.next_search_offset is not None and total and total > count
+                           else f"{count} 首")
+            self.status.set(result.get("warning") or ("" if count else "没有找到歌曲。"))
+        elif library:
             self.count.set(f"{count} 张歌单")
             self.status.set(result.get("warning") or ("" if count else "当前账号没有可读取的歌单。"))
         elif total is not None and total > count:
@@ -332,8 +401,8 @@ class SharedMusicBrowser:
 
     def _update_actions(self, _event=None):
         library = self.view == "library"
-        self.export_button.configure(state="normal" if self.rows and not self.busy and not library else "disabled")
-        can_open = not self.busy and (self.collection_url or self._selected_url())
+        self.export_button.configure(state="normal" if self.rows and not self._opening and not library else "disabled")
+        can_open = not self._opening and (self.collection_url or self._selected_url())
         self.open_button.configure(state="normal" if can_open else "disabled")
         if self.catalog is not None:
             can_go_back = self.private_view and self.view == "tracks" and self.library is not None
@@ -344,14 +413,16 @@ class SharedMusicBrowser:
             else:
                 self.open_playlist_button.grid_remove()
         if self.page_source in ("qq", "netease"):
-            can_enqueue = self.source == self.page_source and not self.busy and not library
+            can_enqueue = self.source == self.page_source and not self._opening and not library
             selected = can_enqueue and bool(self.tree.selection())
             self.download_button.configure(state="normal" if selected else "disabled")
             self.queue_button.configure(state="normal" if selected else "disabled")
-            self.queue_all_button.configure(state="normal" if self.rows and can_enqueue else "disabled")
+            self.queue_all_button.configure(state="normal" if self.rows and can_enqueue and self.view != "search" else "disabled")
 
     def _enqueue(self, begin, *, all_rows=False):
-        if self.source != self.page_source or not self.source or self.view == "library" or self.busy or self.app.closing:
+        if self.source != self.page_source or not self.source or self.view == "library" or self._opening or self.app.closing:
+            return
+        if all_rows and self.view == "search":
             return
         selected = set(self.tree.selection())
         in_playlist = self.private_view or "/playlist" in urlsplit(self.collection_url).path
@@ -396,7 +467,7 @@ class SharedMusicBrowser:
             self.account.close()
 
     def open_original(self, row=None):
-        if self.busy or self.app.closing:
+        if self._opening or self.app.closing:
             return
         url = self._selected_url(row) or self.collection_url
         if url:
@@ -408,7 +479,7 @@ class SharedMusicBrowser:
             self.status.set("无法打开默认浏览器。")
 
     def export_csv(self):
-        if not self.rows or self.view == "library" or self.busy or self.app.closing:
+        if not self.rows or self.view == "library" or self._opening or self.app.closing:
             return
         path = filedialog.asksaveasfilename(parent=self.tree, title="导出曲目 CSV", initialfile="曲目.csv",
                                             defaultextension=".csv", filetypes=[("CSV 文件", "*.csv")])

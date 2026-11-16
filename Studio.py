@@ -24,7 +24,7 @@ for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib")
         sys.path.insert(0, str(library))
 
 import audio
-from account_ui import VerificationDialog, build_account_page
+from account_ui import VerificationDialog, build_account_page, show_library_connection
 from apple_download import SOURCE, download_options, expand_link, forget_bilibili_cache, read_links, run_tasks, task_category
 from bili_auth import BiliAuth
 from bili_catalog import is_video_link, resolve_video
@@ -1048,37 +1048,7 @@ class Studio:
         return settings.session(self.preferences)
 
     def connect_library(self):
-        dialog = tk.Toplevel(self.window)
-        dialog.title("连接 Apple Music 资料库")
-        dialog.transient(self.window)
-        dialog.configure(background=BG)
-        dialog.columnconfigure(0, weight=1)
-        card = self.panel(dialog, padding=(16, 14))
-        card.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
-        card.columnconfigure(0, weight=1)
-        token = tk.StringVar(dialog)
-        self.label(card, "Apple Music 网页会话令牌").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        entry = ttk.Entry(card, textvariable=token, show="•", width=46)
-        entry.grid(row=1, column=0, sticky="ew")
-        actions = tk.Frame(card, bg=PANEL)
-        actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-
-        def accept():
-            try:
-                values = dict(self.preferences)
-                values["session"] = settings.protect_session(token.get())
-                self.store(values)
-                token.set("")
-                dialog.destroy()
-            except (OSError, RuntimeError, ValueError) as error:
-                messagebox.showerror("无法连接资料库", str(error), parent=dialog)
-
-        self.action(actions, "打开 Apple Music", lambda: webbrowser.open("https://music.apple.com/")).pack(side="left")
-        self.action(actions, "连接", accept, primary=True).pack(side="right")
-        entry.bind("<Return>", lambda _: accept())
-        dialog.bind("<Escape>", lambda _: dialog.destroy())
-        dialog.grab_set()
-        entry.focus_set()
+        show_library_connection(self)
 
     def update_path(self, *_):
         base = self.fields["folder"].get().strip()

@@ -15,6 +15,7 @@ _AUTH_CODES = qq_auth.QQ_AUTH_EXPIRED_CODES | {1101, 80030}
 _FAVORITE = 201
 _PAGE_SIZE = 100
 _MAX_PAGES = 100
+_SEARCH_PAGE_SIZE = 50
 _PUBLIC_BASE = "https://y.qq.com/n/ryqq_v2"
 
 
@@ -259,3 +260,51 @@ def resolve_public_qq(value, *, session=None, stop=None):
     except (qq_auth.QqAuthError, QqCatalogError):
         _cancelled(stop)
         return shared_music.resolve_music(url)
+
+
+def search_songs(query, *, session=None, stop=None, offset=0, limit=50):
+    """Search public songs independently of the current account session."""
+    _cancelled(stop)
+    query = " ".join(query.split()) if isinstance(query, str) else ""
+    if not 0 < len(query) <= 120 or any(ord(character) < 32 or ord(character) == 127 for character in query):
+        raise ValueError("请输入 1–120 字的 QQ 音乐搜索关键词。")
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= _SEARCH_PAGE_SIZE:
+        raise ValueError("QQ 音乐搜索分页参数无效。")
+
+    rows = []
+    total = next_offset = None
+    first_page = offset - offset % _SEARCH_PAGE_SIZE
+    for page_start in range(first_page, offset + limit, _SEARCH_PAGE_SIZE):
+        _cancelled(stop)
+        page = page_start // _SEARCH_PAGE_SIZE + 1
+        try:
+            data = _data(qq_auth.qq_public_search_request(query, page, _SEARCH_PAGE_SIZE), "搜索结果")
+            search = _record(data.get("song"))
+            songs = _rows(search, "list", "搜索结果")[:_SEARCH_PAGE_SIZE]
+        except (qq_auth.QqAuthError, QqCatalogError):
+            raise QqCatalogError("暂时无法搜索 QQ 音乐，请稍后重试。") from None
+        if _number(search.get("curpage")) not in {None, page}:
+            raise QqCatalogError("QQ 音乐未返回所请求的搜索页。")
+        published_total = _number(search.get("totalnum"))
+        if published_total is not None and published_total >= 0:
+            total = published_total
+        begin = max(offset, page_start)
+        end = min(offset + limit, page_start + len(songs))
+        for position in range(begin, end):
+            item = _record(songs[position - page_start])
+            title = _text(item.get("title")) or _text(item.get("name"))
+            if row := _track(dict(item, name=title), position + 1):
+                rows.append(row)
+
+        if not songs or (total is not None and end >= total):
+            next_offset = None
+            break
+        if end < page_start + len(songs):
+            next_offset = end
+        elif len(songs) == _SEARCH_PAGE_SIZE or (total is not None and total > page_start + _SEARCH_PAGE_SIZE):
+            next_offset = page_start + _SEARCH_PAGE_SIZE
+        else:
+            next_offset = None
+            break
+    _cancelled(stop)
+    return {"source": "qq", "title": query, "rows": rows, "total": total, "next_offset": next_offset}

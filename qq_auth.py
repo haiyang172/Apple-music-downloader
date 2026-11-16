@@ -26,6 +26,7 @@ _LOGIN_JUMP = "https://graph.qq.com/oauth2.0/login_jump"
 _AUTHORIZE = "https://graph.qq.com/oauth2.0/authorize"
 _MUSIC = "https://y.qq.com"
 _MUSICU = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+_PUBLIC_SEARCH = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
 _COLLECTED = "https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg"
 _HOMEPAGE = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg"
 _RETURN = _MUSIC + "/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/"
@@ -249,6 +250,14 @@ def qq_public_playlist_request(params):
     """Read a page of an anonymously accessible QQ Music playlist."""
     protocol = {"ct": "11", "cv": 13020508, "v": 13020508, "tmeAppID": "qqmusic", "format": "json", "uid": "0"}
     return _musicu("music.srfDissInfo.DissInfo", "CgiGetDiss", params, protocol)
+
+
+def qq_public_search_request(query, page, page_size):
+    """Read QQ Music's public song search without an account session."""
+    params = {"format": "json", "w": query, "p": page, "n": page_size, "t": 0,
+              "new_json": 1, "aggr": 1, "loginUin": 0, "hostUin": 0}
+    raw, _ = _request(_PUBLIC_SEARCH + "?" + urlencode(params), _MUSIC + "/")
+    return _json_object(raw)
 
 
 def _finish_login(jar, location):

@@ -475,6 +475,58 @@ import bili_resume
 from io import BytesIO
 from unittest.mock import patch
 
+window, app = new_window()
+try:
+    collection = {"type": "playlist", "library_id": "p.saved-fixture", "title": "已缓存歌单"}
+    track = {"title": "已缓存曲目", "type": "song", "url": "https://music.apple.com/au/song/901"}
+    token = "fixture-cache-scope"
+    app.library_token = lambda: token
+    scope = music_browser._library_cache_scope(token, app.catalog_region(), "playlist", collection)
+    app.library_cache.save(scope, [track])
+    client = TestCatalog()
+    browser = app.library_browser
+
+    def offline(*_args, **_kwargs):
+        raise music_browser.CatalogError("暂时无法同步", 503)
+
+    def forbidden(*_args, **_kwargs):
+        raise music_browser.CatalogError("歌单已删除", 404)
+
+    with patch.object(music_browser, "LibraryClient", return_value=client), \
+         patch.object(client, "tracks", side_effect=offline), \
+         patch.object(app, "queue_music", return_value=1) as enqueue:
+        browser._resolve_batch([collection], False)
+        wait_for(window, lambda: not browser.batch_busy)
+        enqueue.assert_called_once()
+        assert enqueue.call_args.args[0][0]["url"] == track["url"]
+        assert "使用上次同步" in browser.status.get()
+    with patch.object(music_browser, "LibraryClient", return_value=client), \
+         patch.object(client, "tracks", side_effect=forbidden), \
+         patch.object(app, "queue_music") as enqueue:
+        browser._resolve_batch([collection], False)
+        wait_for(window, lambda: not browser.batch_busy)
+        enqueue.assert_not_called()
+finally:
+    app.close()
+print("Apple Music batch queue reuses complete cached playlists on temporary failure only.")
+
+window, app = new_window()
+try:
+    candidate = "fixture-library-token-" + "a" * 60
+    app.connect_library()
+    form = app.library_connection_dialog
+    form.token.set(candidate)
+    with patch.object(app.catalog, "request", return_value={"data": []}) as validated:
+        form.submit.invoke()
+        wait_for(window, lambda: app.active_page == "library" and app.library_token() == candidate)
+        assert validated.call_args_list[0].args[0] == "/v1/me/library/songs"
+        assert validated.call_args_list[0].kwargs["user_token"] == candidate
+    assert candidate not in settings.FILE.read_text(encoding="utf-8")
+    app.clear_account()
+finally:
+    app.close()
+print("Apple Music library authorization validation and encrypted storage passed.")
+
 original_parts = bili_catalog._fetch_parts
 original_metadata = bili_catalog._fetch_video_metadata
 original_bili_download = apple_download.download_video
@@ -861,6 +913,58 @@ try:
 finally:
     app.close()
 print("Shared playlist routing, CSV export, QQ and NetEase QR sessions, personal playlists, and download queue passed.")
+
+window, app = new_window()
+try:
+    for source, catalog, template in (
+        ("qq", qq_catalog, "https://y.qq.com/n/ryqq_v2/songDetail/{:014d}"),
+        ("netease", netease_catalog, "https://music.163.com/song?id={:d}"),
+    ):
+        calls = []
+
+        def track(index):
+            return {"source": source, "url": template.format(index), "title": f"曲目 {index}",
+                    "artist": "Fixture Artist", "duration": 70, "position": index}
+
+        def search(query, *, session=None, stop=None, offset=0):
+            assert query == "示例"
+            calls.append(offset)
+            if calls == [0, 3]:
+                raise RuntimeError("临时网络错误")
+            rows, cursor = {0: ([track(1), track(2), track(3)], 3),
+                            3: ([track(3), track(4)], 6),
+                            6: ([track(4)], 9)}[offset]
+            return {"source": source, "title": query, "rows": rows, "total": 10, "next_offset": cursor}
+
+        app.show(source)
+        browser = app.shared_music_browsers[source]
+        with patch.object(catalog, "search_songs", side_effect=search):
+            browser.link.set("示例")
+            browser.resolve()
+            wait_for(window, lambda: not browser.busy and len(browser.rows) == 3)
+            selected = browser.tree.get_children()[0]
+            browser.tree.selection_set(selected)
+            with patch.object(browser.tree, "winfo_viewable", return_value=True):
+                browser._scroll_changed("0.1", "0.8")
+                assert calls == [0]
+                browser._scroll_changed("0.5", "0.96")
+            wait_for(window, lambda: not browser.busy and bool(browser.search_warning))
+            assert len(browser.rows) == 3 and browser.retry_button.winfo_manager()
+            browser.retry_button.invoke()
+            wait_for(window, lambda: not browser.busy and len(browser.rows) == 4)
+            assert browser.tree.selection() == (selected,)
+            assert str(browser.queue_all_button.cget("state")) == "disabled"
+            browser._load_next_search_page()
+            wait_for(window, lambda: not browser.busy and browser.next_search_offset is None)
+            assert len(browser.rows) == 4 and calls == [0, 3, 3, 6]
+        with patch.object(app, "enqueue_tasks", return_value=1) as enqueue:
+            browser.download_button.invoke()
+            enqueue.assert_called_once()
+            rows, begin = enqueue.call_args.args
+            assert begin and rows[0]["url"] == template.format(1) and "position" not in rows[0]
+finally:
+    app.close()
+print("QQ and NetEase song search, scroll pagination, retry, deduplication, and queue actions passed.")
 
 web = backend / "web"
 for command, version in (

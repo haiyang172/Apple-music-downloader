@@ -22,8 +22,9 @@ _UNIQUE_KEY = "/api/login/qrcode/unikey"
 _POLL = "/api/login/qrcode/client/login"
 _ACCOUNT = "/api/nuser/account/get"
 _USER_PLAYLISTS = "/api/user/playlist"
+_SONG_SEARCH = "/api/cloudsearch/pc"
 _AUTH_ROUTES = frozenset({_UNIQUE_KEY, _POLL})
-_API_ROUTES = frozenset({_ACCOUNT, _USER_PLAYLISTS, "/api/playlist/detail", "/api/v6/playlist/detail",
+_API_ROUTES = frozenset({_ACCOUNT, _USER_PLAYLISTS, _SONG_SEARCH, "/api/playlist/detail", "/api/v6/playlist/detail",
                          "/api/song/detail", "/api/v3/song/detail", "/api/song/enhance/player/url"})
 _USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -154,6 +155,14 @@ def netease_api_request(session, path, params=None):
     if path == _USER_PLAYLISTS:
         params = {**(params or {}), "uid": session.user_id}
     return _request(path, params, cookies=session._cookies)
+
+
+def netease_search_request(query, offset, limit, *, session=None):
+    """Read public songs on the fixed NetEase Music search route."""
+    params = {"s": query, "type": 1, "offset": offset, "limit": limit, "total": "true"}
+    if session is None:
+        return _request(_SONG_SEARCH, params)
+    return netease_api_request(session, _SONG_SEARCH, params)
 
 
 def _account(cookies):

@@ -16,7 +16,7 @@ from tkinter import font, ttk
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from music_catalog import CatalogClient, artwork_url_at_size
+from music_catalog import CatalogClient, CatalogError, artwork_url_at_size
 from music_library import LibraryClient
 from round_theme import music_placeholder
 
@@ -32,6 +32,12 @@ def _duration(value):
         return "—"
     minutes, seconds = divmod(round(value), 60)
     return f"{minutes}:{seconds:02}"
+
+
+def _library_cache_scope(token, region, kind, collection):
+    identity = ("collection", collection["type"], collection["library_id"]) if collection else ("library", kind)
+    key = json.dumps((token, region, identity), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def _apple_music_link(value):
@@ -509,11 +515,7 @@ class MusicBrowser:
             token = self.app.library_token()
         except ValueError as problem:
             error = str(problem)
-        scope = None
-        if token:
-            identity = ("collection", collection["type"], collection["library_id"]) if collection else ("library", kind)
-            key = json.dumps((token, region, identity), ensure_ascii=False, separators=(",", ":"))
-            scope = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        scope = _library_cache_scope(token, region, kind, collection) if token else None
         same = bool(scope and scope == self.library_scope)
         if same and self.busy:
             return
@@ -999,12 +1001,14 @@ class MusicBrowser:
         self.batch_busy = True
         self._selection_changed()
         self.status.set("正在读取完整曲目列表…")
+        checked = frozenset(self.library_checked)
 
         def cancelled():
             return self.app.closing or serial != self.batch_serial
 
         def resolve():
             items, failures = [], []
+            cached_count = 0
             for item in selected:
                 if cancelled():
                     return
@@ -1015,7 +1019,9 @@ class MusicBrowser:
                     if library is None:
                         rows = self.catalog.tracks(item, item.get("storefront") or storefront)
                     else:
-                        rows = self._library_collection(library, item, cancelled)
+                        scope = _library_cache_scope(token, storefront, item["type"], item)
+                        rows, offline = self._library_collection(library, item, scope, scope in checked, cancelled)
+                        cached_count += int(offline)
                     if not rows:
                         failures.append(f"{item['title']}没有曲目。")
                     items.extend(_collection_items(item, enumerate(rows, 1), len(rows)))
@@ -1025,15 +1031,34 @@ class MusicBrowser:
                 error = failures[0] if failures else ""
                 if len(failures) > 1:
                     error += f"（共 {len(failures)} 个列表无法读取）"
+                if cached_count:
+                    error = " · ".join(filter(None, (error, f"{cached_count} 个列表使用上次同步的曲目")))
                 skipped = sum(not _apple_music_link(item.get("url")) for item in items)
                 self.app.post("browser_batch", (self, serial, items, skipped, error, begin))
 
         threading.Thread(target=resolve, daemon=True).start()
 
-    @staticmethod
-    def _library_collection(library, collection, cancelled):
-        return [row for page, _ in MusicBrowser._library_pages(library, collection["type"], collection,
-                                                               cancelled, None, set()) for row in page]
+    def _library_collection(self, library, collection, scope, checked, cancelled):
+        try:
+            snapshot = self.app.library_cache.load(scope)
+        except (OSError, sqlite3.Error, ValueError):
+            snapshot = None
+        if checked and snapshot is not None:
+            return snapshot, False
+        try:
+            rows = [row for page, _ in self._library_pages(library, collection["type"], collection,
+                                                           cancelled, None, set()) for row in page]
+        except (OSError, CatalogError) as error:
+            status = error.status if isinstance(error, CatalogError) else None
+            if snapshot is None or (status is not None and status != 429 and status < 500):
+                raise
+            return snapshot, True
+        if not cancelled():
+            try:
+                self.app.library_cache.save(scope, rows)
+            except (OSError, sqlite3.Error, ValueError):
+                pass
+        return rows, False
 
     @staticmethod
     def _library_pages(library, kind, collection, cancelled, cursor, seen):

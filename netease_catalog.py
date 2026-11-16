@@ -1,4 +1,4 @@
-"""Read the signed-in NetEase Cloud Music account's playlists and tracks."""
+"""Search NetEase Cloud Music and read a signed-in account's playlists."""
 
 import json
 import re
@@ -9,6 +9,7 @@ import netease_auth
 _BASE = "https://music.163.com"
 _PAGE_SIZE = 100
 _MAX_PAGES = 100
+_MAX_SEARCH_OFFSET = 10_000
 _PRIVATE = 10
 _LIKED = 5
 _AUTH_CODES = {301, 401}
@@ -126,6 +127,40 @@ def _track(song, position):
     return {"source": "netease", "id": str(identifier), "title": title, "position": position,
             "artist": " / ".join(dict.fromkeys(filter(None, names))), "album": _text(album.get("name")),
             "duration": (_number(song.get("dt")) or 0) / 1000, "url": f"{_BASE}/song?id={identifier}"}
+
+
+def search_songs(query, *, session=None, stop=None, offset=0, limit=50):
+    """Read one page of public songs in the provider's relevance order."""
+    query = " ".join(query.split()) if isinstance(query, str) else ""
+    if not query or len(query) > 240 or any(ord(char) < 32 or ord(char) == 127 for char in query):
+        raise ValueError("请输入 1 至 240 个字符的歌曲搜索词。")
+    if type(offset) is not int or not 0 <= offset < _MAX_SEARCH_OFFSET:
+        raise ValueError("无效的网易云音乐搜索位置。")
+    if type(limit) is not int or not 1 <= limit <= _PAGE_SIZE:
+        raise ValueError("无效的网易云音乐搜索条数。")
+
+    _cancelled(stop)
+    response = netease_auth.netease_search_request(query, offset, limit, session=session)
+    _cancelled(stop)
+    result = _record(_checked(response, "搜索结果").get("result"))
+    page = result.get("songs")
+    total = _number(result.get("songCount"))
+    if page is None and total == 0:
+        page = []
+    if not isinstance(page, list) or len(page) > limit:
+        raise NeteaseCatalogError("网易云音乐未返回有效的歌曲搜索结果。")
+
+    # The service can return more records beyond its published count or recycle earlier pages.
+    if total is not None:
+        page = page[:max(0, total - offset)]
+    rows = [row for position, song in enumerate(page, offset + 1)
+            if isinstance(song, dict) and (row := _track(song, position))]
+    if page and not rows:
+        raise NeteaseCatalogError("网易云音乐未返回有效的歌曲搜索结果。")
+    following = offset + len(page)
+    more = len(page) == limit and following < _MAX_SEARCH_OFFSET and (total is None or following < total)
+    return {"source": "netease", "title": query, "rows": rows, "total": total,
+            "next_offset": following if more else None}
 
 
 def _tracks_by_id(tracks):
