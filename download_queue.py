@@ -31,6 +31,7 @@ class QueueTask:
     media_category: str = ""
     duration: float | None = None
     batch_key: str = ""
+    song_edited: bool = False
 
 
 def _task(row):
@@ -44,7 +45,7 @@ def _task(row):
         error=row["error"], files=tuple(json.loads(row["files"])),
         audio_title=row["audio_title"],
         uploader=row["uploader"], source_category=row["source_category"], media_category=row["media_category"],
-        duration=row["duration"], batch_key=row["batch_key"],
+        duration=row["duration"], batch_key=row["batch_key"], song_edited=bool(row["song_edited"]),
     )
 
 
@@ -81,6 +82,7 @@ class QueueStore:
                     source_category TEXT NOT NULL DEFAULT '',
                     media_category TEXT NOT NULL DEFAULT '',
                     duration REAL,
+                    song_edited INTEGER NOT NULL DEFAULT 0 CHECK (song_edited IN (0, 1)),
                     UNIQUE (source, url, batch_key, position)
                 )
             """)
@@ -89,6 +91,8 @@ class QueueStore:
                 db.execute("ALTER TABLE tasks ADD COLUMN audio_title TEXT")
             if "duration" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN duration REAL")
+            if "song_edited" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN song_edited INTEGER NOT NULL DEFAULT 0 CHECK (song_edited IN (0, 1))")
             for column in ("uploader", "source_category", "media_category"):
                 if column not in columns:
                     db.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
@@ -116,25 +120,38 @@ class QueueStore:
                 position = item.get("position") or 0
                 total = item.get("total")
                 options = item.get("options")
+                edited = source == "bilibili" and item.get("song_edited") is True
+                audio_title = item.get("audio_title")
+                if edited and audio_title is None:
+                    audio_title = ""
                 db.execute("""
                     INSERT INTO tasks (source, url, title, artist, batch_key, batch_title,
                                        position, total, options, audio_title, uploader, source_category, media_category,
-                                       duration)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       duration, song_edited)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (source, url, batch_key, position) DO UPDATE SET
                         total = COALESCE(excluded.total, tasks.total),
-                        audio_title = COALESCE(NULLIF(excluded.audio_title, ''), tasks.audio_title,
-                                               excluded.audio_title),
-                        artist = COALESCE(NULLIF(excluded.artist, ''), tasks.artist),
+                        audio_title = CASE
+                            WHEN excluded.song_edited THEN excluded.audio_title
+                            WHEN tasks.song_edited THEN tasks.audio_title
+                            ELSE COALESCE(NULLIF(excluded.audio_title, ''), tasks.audio_title, excluded.audio_title)
+                        END,
+                        artist = CASE
+                            WHEN excluded.song_edited THEN excluded.artist
+                            WHEN tasks.song_edited THEN tasks.artist
+                            ELSE COALESCE(NULLIF(excluded.artist, ''), tasks.artist)
+                        END,
+                        song_edited = MAX(tasks.song_edited, excluded.song_edited),
                         uploader = COALESCE(NULLIF(excluded.uploader, ''), tasks.uploader),
                         source_category = COALESCE(NULLIF(excluded.source_category, ''), tasks.source_category),
                         media_category = COALESCE(NULLIF(excluded.media_category, ''), tasks.media_category),
                         duration = COALESCE(NULLIF(excluded.duration, 0), tasks.duration, excluded.duration)
+                    WHERE NOT excluded.song_edited OR (tasks.state NOT IN ('running', 'complete') AND tasks.files = '[]')
                 """, (source, url, item.get("title") or url, item.get("artist") or "",
                       batch_key, batch_title, position, total,
-                      _options_json(options) if options is not None else None, item.get("audio_title"),
+                      _options_json(options) if options is not None else None, audio_title,
                       item.get("uploader") or "", item.get("source_category") or "", item.get("media_category") or "",
-                      item.get("duration")))
+                      item.get("duration"), int(edited)))
                 row = db.execute("""
                     SELECT * FROM tasks WHERE source = ? AND url = ? AND batch_key = ? AND position = ?
                 """, (source, url, batch_key, position)).fetchone()
@@ -191,9 +208,9 @@ class QueueStore:
                 copy = db.execute("""
                     INSERT INTO tasks (source, url, title, artist, batch_key, batch_title,
                                        position, total, options, audio_title, uploader, source_category, media_category,
-                                       duration)
+                                       duration, song_edited)
                     SELECT source, url, title, artist, batch_key || ?, batch_title,
-                           position, total, ?, audio_title, uploader, source_category, media_category, duration
+                           position, total, ?, audio_title, uploader, source_category, media_category, duration, song_edited
                     FROM tasks WHERE id = ? AND state = 'complete'
                 """, (f":repeat:{repeat}", encoded, task_id))
                 if copy.rowcount:

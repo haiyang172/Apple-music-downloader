@@ -480,6 +480,7 @@ from unittest.mock import patch
 window = tk.Tk()
 window.withdraw()
 try:
+    window.update_idletasks()
     pixels = 104
     bands = b"\0\0\xff" * 20 + b"\xff\0\0" * 20 + b"\0\xff\0" * 20 + b"\xff\xff\xff" * 20
     source = b"P6\n80 40\n255\n" + bands * 40
@@ -689,6 +690,32 @@ try:
     browser.queue_all()
     collection_task, = [item for item in app.tasks.values() if item.batch_title == "测试合集"]
     assert (collection_task.position, collection_task.total) == (4, 12) and collection_task.url.endswith("?p=1")
+
+    browser.open_parts()
+    wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
+    edition_row = browser.tree.get_children()[0]
+    browser.tree.selection_set(edition_row)
+    source_row = dict(browser.rows[edition_row], audio_title="测试歌手", artist="测试歌曲")
+    browser.rows[edition_row].update(source_row)
+    original_title = source_row["title"]
+
+    def all_children(parent):
+        for child in parent.winfo_children():
+            yield child
+            yield from all_children(child)
+
+    browser.edit_song()
+    dialog = next(w for w in window.winfo_children() if isinstance(w, tk.Toplevel) and w.title() == "编辑歌名和歌手")
+    buttons = {w.cget("text"): w for w in all_children(dialog) if w.winfo_class() == "TButton"}
+    buttons["互换"].invoke()
+    buttons["应用"].invoke()
+    assert browser.tree.set(edition_row, "title") == "测试歌曲 · 测试歌手"
+    assert browser.rows[edition_row]["title"] == original_title
+    browser.queue_selected()
+    edited, = [item for item in app.tasks.values() if item.source == "bilibili" and item.song_edited]
+    assert (edited.audio_title, edited.artist) == ("测试歌曲", "测试歌手")
+    persisted, = app.queue_store.add([source_row])
+    assert (persisted.id, persisted.audio_title, persisted.artist) == (edited.id, "测试歌曲", "测试歌手")
 finally:
     apple_download.download_video = original_bili_download
     apple_download.save_danmaku = original_danmaku

@@ -692,7 +692,8 @@ class Studio:
                 lines.append(BILI_FORMATS.get(task.options.get("bili_mode"), BILI_FORMATS["video"]))
                 if task.audio_title:
                     title = f"{task.artist} - {task.audio_title}" if task.artist else task.audio_title
-                    lines.append(f"识别歌名 · {title}")
+                    label = "手动歌名" if task.song_edited else "识别歌名"
+                    lines.append(f"{label} · {title}")
                 if task.options.get("bili_danmaku"):
                     lines.append("保存弹幕（ASS）")
                 if task.options.get("bili_subtitle"):

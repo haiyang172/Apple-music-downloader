@@ -95,6 +95,9 @@ class BiliBrowser:
         self.tree.bind("<Control-a>", self._select_all)
         self.tree.bind("<Return>", self._queue_from_keyboard)
         self.tree.bind("<Double-1>", self._open_clicked)
+        self.tree.bind("<Button-3>", self._row_menu)
+        self.song_menu = tk.Menu(self.tree, tearoff=False)
+        self.song_menu.add_command(label="编辑歌名和歌手", command=self.edit_song)
         scrollbar = ttk.Scrollbar(card, command=self.tree.yview, style="Music.Vertical.TScrollbar")
         scrollbar.grid(row=1, column=1, sticky="ns", padx=(round(5 * app.scale), 0))
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -223,6 +226,77 @@ class BiliBrowser:
     def _open_clicked(self, event):
         if self.tree.identify_region(event.x, event.y) in ("tree", "cell"):
             self.open_parts(self.tree.identify_row(event.y))
+
+    def _row_menu(self, event):
+        if self.busy or self.app.closing or self.tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            return
+        row = self.tree.identify_row(event.y)
+        if row not in self.rows:
+            return
+        self.tree.selection_set(row)
+        self.tree.focus(row)
+        try:
+            self.song_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.song_menu.grab_release()
+        return "break"
+
+    def edit_song(self):
+        selected = self.tree.selection()
+        if self.busy or self.app.closing or len(selected) != 1:
+            return
+        row, = selected
+        item = self.rows.get(row)
+        if item is None:
+            return
+
+        app = self.app
+        dialog = tk.Toplevel(app.window, background=app.background)
+        dialog.title("编辑歌名和歌手")
+        dialog.transient(app.window)
+        dialog.resizable(False, False)
+        song = tk.StringVar(dialog, item.get("audio_title") or item["title"])
+        artist = tk.StringVar(dialog, item.get("artist") or "")
+        status = tk.StringVar(dialog)
+        card = app.panel(dialog, padding=(round(16 * app.scale), round(13 * app.scale)))
+        card.pack(fill="both", expand=True, padx=10, pady=10)
+        card.columnconfigure(0, weight=1, minsize=round(330 * app.scale))
+        app.label(card, "歌名").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        title_entry = ttk.Entry(card, textvariable=song, style="MusicSearch.TEntry")
+        title_entry.grid(row=1, column=0, sticky="ew")
+        app.label(card, "歌手").grid(row=2, column=0, sticky="w", pady=(9, 4))
+        ttk.Entry(card, textvariable=artist, style="MusicSearch.TEntry").grid(row=3, column=0, sticky="ew")
+        app.label(card, variable=status, muted=True).grid(row=4, column=0, sticky="w", pady=(4, 0))
+
+        def swap():
+            previous_title = song.get()
+            song.set(artist.get())
+            artist.set(previous_title)
+
+        def apply(_event=None):
+            title = song.get().strip()
+            if not title:
+                status.set("请输入歌名。")
+                title_entry.focus_set()
+                return "break"
+            if not app.closing and self.rows.get(row) is item:
+                item.update(audio_title=title, artist=artist.get().strip(), song_edited=True)
+                self.tree.set(row, "title", self._display_title(item))
+                self.sort.apply()
+                self._selection_changed()
+            dialog.destroy()
+            return "break"
+
+        actions = ttk.Frame(card, style="Card.TFrame")
+        actions.grid(row=5, column=0, sticky="ew", pady=(7, 0))
+        app.action(actions, "互换", swap).pack(side="left")
+        app.action(actions, "应用", apply, primary=True).pack(side="right")
+        app.action(actions, "取消", dialog.destroy).pack(side="right", padx=(0, 7))
+        dialog.bind("<Escape>", lambda _: dialog.destroy())
+        dialog.bind("<Return>", apply)
+        dialog.grab_set()
+        title_entry.focus_set()
+        title_entry.selection_range(0, "end")
 
     def back(self):
         if not self.parent_view or self.busy:
