@@ -90,6 +90,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from unittest.mock import patch
 
 root = Path(sys.argv[1])
 profile = Path(os.environ["LOCALAPPDATA"])
@@ -300,6 +301,28 @@ try:
     assert browser.cursor is None and not browser.retry_page.winfo_manager()
     assert catalogue.calls[-2:] == [("paged", "last"), ("paged", "last")]
 
+    browser.tree.yview_moveto(0.3)
+    window.update()
+    first = browser.tree.yview()[0]
+    event = tk.Event()
+    event.widget = window
+    scales = ((192, 104, 128), (96, 52, 64), (144, 78, 96)) if app.sidebar_scale == 1 else (
+        (96, 52, 64), (192, 104, 128), (144, 78, 96))
+    for dpi, pixels, height in scales:
+        request_count = len(art_requests)
+        old_serial = browser.art_serial
+        with patch.object(Studio.ctypes.windll.user32, "GetDpiForWindow", return_value=dpi):
+            app.refresh_sidebar_art(event)
+            wait_for(window, lambda: not browser.art_busy and any(
+                actual == pixels for _, actual in art_requests[request_count:]))
+        assert browser.cover_size == app.library_browser.cover_size == pixels
+        assert int(Studio.ttk.Style(window).lookup("Music.Treeview", "rowheight")) == height
+        assert browser.tree.selection() == (selected,)
+        assert abs(browser.tree.yview()[0] - first) <= 1 / len(browser.rows)
+        assert browser.art_serial > old_serial
+        browser.receive_art(old_serial, "old-size-fixture", None)
+        assert "old-size-fixture" not in browser.thumbnails
+
     catalogue.release_second.clear()
     catalogue.second_started.clear()
     browser.search()
@@ -318,7 +341,7 @@ try:
 finally:
     music_browser._thumbnail = original_thumbnail
     app.close()
-print("Scrolling fetched pages on demand, retained selection and position, and loaded visible artwork only.")
+print("Scrolling, visible artwork, and selection retention across simulated 100/150/200 percent DPI passed.")
 
 
 class PagedLibrary:
@@ -476,7 +499,6 @@ import base64
 import json
 from dataclasses import replace
 from io import BytesIO
-from unittest.mock import patch
 
 window = tk.Tk()
 window.withdraw()
@@ -688,6 +710,9 @@ try:
         app.export_queue_playlist()
     playlist_lines = playlist.read_text(encoding="utf-8").splitlines()
     assert playlist_lines[0] == "#EXTM3U" and playlist_lines[-1] == "音乐/周杰伦 - 夜曲.m4a"
+    with patch.object(app.local_converter, "add_files") as convert:
+        app.convert_saved_selection()
+        convert.assert_called_once_with([task.files[0]])
 
     collection = "https://space.bilibili.com/517327498/lists/3993361?type=season"
     collection_result = {"title": "测试合集", "collection_kind": "season", "rows": [

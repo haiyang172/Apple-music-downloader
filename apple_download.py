@@ -260,7 +260,7 @@ def forget_bilibili_cache(store, task):
         pass
 
 
-def _save_bili_metadata(url, stage, stop, on_status, *, task, media):
+def _save_bili_metadata(url, stage, stop, on_status, *, task, media, song_title):
     if stop.is_set():
         raise Cancelled()
     on_status("正在保存作品资料…")
@@ -272,7 +272,7 @@ def _save_bili_metadata(url, stage, stop, on_status, *, task, media):
         "video_id": video_id,
         "part": page or 1,
         "video_title": task.title,
-        "song_title": task.audio_title,
+        "song_title": song_title,
         "artist": task.artist,
         "uploader": task.uploader,
         "partition": task.source_category,
@@ -327,7 +327,7 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
             ("bili_danmaku", "弹幕", save_danmaku, {}),
             ("bili_subtitle", "人工字幕", save_subtitle, {"session": session}),
             ("bili_archive", "封面", save_cover, {}),
-            ("bili_archive", "作品资料", _save_bili_metadata, {"task": task, "media": published}),
+            ("bili_archive", "作品资料", _save_bili_metadata, {"task": task, "media": published, "song_title": song or task.audio_title}),
         ):
             if not task.options.get(option):
                 continue

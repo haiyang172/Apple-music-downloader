@@ -33,6 +33,7 @@ from bili_ui import BiliBrowser
 from download_queue import QueueStore
 from engine import Engine
 from library_cache import LibraryCache
+from local_convert import formats_for
 from local_convert_ui import FORMATS as LOCAL_FORMATS, LocalConverter
 from login_service import LoginService
 from music_browser import MusicBrowser, TreeSort, prepare_preview
@@ -354,6 +355,10 @@ class Studio:
         )
         self.brand_label.configure(image=self.brand_icon)
         self.profile_button.configure(image=self.profile_icon)
+        for name in ("music_browser", "library_browser"):
+            browser = getattr(self, name, None)
+            if browser is not None:
+                browser.set_cover_scale(scale)
 
     def sidebar_icon(self, prefix, size, scale):
         assets = self.sidebar_assets[prefix]
@@ -733,7 +738,8 @@ class Studio:
             menu.grab_release()
 
     def convert_saved_selection(self):
-        paths = [path for row in self.queue_tree.selection() for path in self.tasks[int(row)].files]
+        paths = [path for row in self.queue_tree.selection() for path in self.tasks[int(row)].files
+                 if formats_for(Path(path))]
         if paths:
             self.show("local")
             self.local_converter.add_files(paths)

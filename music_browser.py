@@ -329,15 +329,9 @@ class MusicBrowser:
 
         self.tree = ttk.Treeview(result, columns=("artist", "album", "duration"), show="tree headings",
                                  selectmode="extended", style="Music.Treeview")
-        self.cover_size = round(52 * app.scale)
-        self.row_images = {kind: music_placeholder(self.tree, self.cover_size, kind) for kind in FILTERS}
         self.row_font = font.Font(root=self.tree, family=app.font, size=11)
-        heading_font = font.Font(root=self.tree, family=app.font, size=10, weight="bold")
-        self.cell_padding = max(14, round(12 * app.scale))
-        self.tree_inset = max(4, round(4 * app.scale))
-        self.duration_width = max(round(65 * app.scale),
-                                  self.row_font.measure("1439:59") + self.cell_padding,
-                                  heading_font.measure("时长  ▼") + self.cell_padding)
+        self.heading_font = font.Font(root=self.tree, family=app.font, size=10, weight="bold")
+        self._set_cover_metrics(app.scale)
         self.tree.heading("#0", text="名称", anchor="w")
         self.tree.heading("artist", text="艺人", anchor="w")
         self.tree.heading("album", text="专辑", anchor="w")
@@ -390,6 +384,33 @@ class MusicBrowser:
     def _scrolled(self, scrollbar, first, last):
         scrollbar.set(first, last)
         self._schedule_view()
+
+    def _set_cover_metrics(self, scale):
+        self.cover_scale = scale
+        self.cover_size = round(52 * scale)
+        self.row_images = {kind: music_placeholder(self.tree, self.cover_size, kind) for kind in FILTERS}
+        self.cell_padding = max(14, round(12 * scale))
+        self.tree_inset = max(4, round(4 * scale))
+        self.duration_width = max(round(65 * scale), self.row_font.measure("1439:59") + self.cell_padding,
+                                  self.heading_font.measure("时长  ▼") + self.cell_padding)
+
+    def set_cover_scale(self, scale):
+        if scale == self.cover_scale or self.app.closing:
+            return
+        first = self.tree.yview()[0]
+        self.art_serial += 1
+        self.art_visible = ()
+        self.art_wanted.clear()
+        self.thumbnails.clear()
+        self.sized_rows.clear()
+        self._set_cover_metrics(scale)
+        style = ttk.Style(self.tree)
+        name = self.tree.cget("style")
+        height = round(64 * scale)
+        if str(style.lookup(name, "rowheight")) != str(height):
+            style.configure(name, rowheight=height)
+        self.tree.yview_moveto(first)
+        self.reflow()
 
     def _schedule_view(self):
         if self.view_timer is None and not self.app.closing:
@@ -811,7 +832,7 @@ class MusicBrowser:
     def cells(self, item):
         artist = self.clipped(item.get("artist") or "—", self.tree.column("artist", "width") - self.cell_padding)
         album = self.clipped(item.get("album") or "—", self.tree.column("album", "width") - self.cell_padding)
-        padding = self.cell_padding + self.cover_size + round(8 * self.app.scale)
+        padding = self.cell_padding + self.cover_size + round(8 * self.cover_scale)
         title = self.clipped(item["title"], self.tree.column("#0", "width") - padding)
         return title, (artist, album, _duration(item.get("duration")))
 
@@ -873,16 +894,17 @@ class MusicBrowser:
         self.art_visible = visible
         pending = {}
         for row in visible:
-            url = self.rows[row].get("artwork_url")
-            if not url:
-                continue
-            if url in self.thumbnails:
-                self.thumbnails.move_to_end(url)
-                image = self.thumbnails[url]
-                if image is not None and str(image) not in self.tree.item(row, "image"):
-                    self.tree.item(row, image=image)
-            else:
-                pending[url] = None
+            item = self.rows[row]
+            image = self.row_images.get(item.get("type"), self.row_images["song"])
+            url = item.get("artwork_url")
+            if url:
+                if url in self.thumbnails:
+                    self.thumbnails.move_to_end(url)
+                    image = self.thumbnails[url] or image
+                else:
+                    pending[url] = None
+            if str(image) not in self.tree.item(row, "image"):
+                self.tree.item(row, image=image)
         self.art_wanted = set(pending)
         if self.art_busy or not pending:
             return
@@ -935,7 +957,7 @@ class MusicBrowser:
         image = tk.PhotoImage(master=self.tree, width=size, height=size)
         image.tk.call(str(image), "copy", str(source), "-from", x, y, x + side, y + side,
                       "-zoom", numerator, numerator, "-subsample", denominator, denominator)
-        radius = max(2, round(6 * self.app.scale))
+        radius = max(2, round(6 * self.cover_scale))
         for x in range(radius):
             for y in range(radius):
                 if (radius - x - 0.5) ** 2 + (radius - y - 0.5) ** 2 > radius ** 2:
