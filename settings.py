@@ -25,6 +25,7 @@ DEFAULTS = {
     "bili_subtitle": False,
     "bili_archive": False,
     "bili_auto_category": True,
+    "music_sidecars": False,
     "mp3_bitrate": 320,
     "region": "au",
     "wrapper": "",

@@ -508,6 +508,10 @@ class Studio:
                                                state="readonly", width=15, style="Surface.TCombobox")
         self.youtube_format_box.grid(row=3, column=1, sticky="w", pady=(6, 0))
         self.youtube_format_box.bind("<<ComboboxSelected>>", self.quality_changed)
+        self.music_sidecars_box = ttk.Checkbutton(options, text="QQ 音乐与网易云 · 封面和歌词",
+                                                 variable=self.fields["music_sidecars"], command=self.save_preferences,
+                                                 style="Surface.TCheckbutton")
+        self.music_sidecars_box.grid(row=4, column=0, columnspan=5, sticky="w", pady=(5, 0))
         options.columnconfigure(1, weight=0)
         options.columnconfigure(2, weight=1)
         self.label(options, variable=self.path_summary, background=BG, muted=True, wrap=245).grid(
@@ -624,6 +628,10 @@ class Studio:
                     widget.grid()
                 else:
                     widget.grid_remove()
+        if source in ("all", "qq", "netease"):
+            self.music_sidecars_box.grid()
+        else:
+            self.music_sidecars_box.grid_remove()
 
     def selected_queue_source(self):
         return next(key for key, label in QUEUE_SOURCES.items() if label == self.queue_source.get())
@@ -740,6 +748,8 @@ class Studio:
                 lines.append(YOUTUBE_FORMATS.get(task.options.get("youtube_mode"), YOUTUBE_FORMATS["video"]))
             elif task.source == "local":
                 lines.extend((task.url, LOCAL_FORMATS.get(task.options.get("local_format"), "")))
+            elif task.source in ("qq", "netease") and task.options.get("music_sidecars"):
+                lines.append("保存封面和歌词")
             lines.append(str(Path(task.options["folder"]) / task_category(task)))
         if task.error:
             lines.append(task.error)
@@ -1539,6 +1549,7 @@ class Studio:
         self.bili_subtitle_box.configure(state=state)
         self.bili_archive_box.configure(state=state)
         self.bili_category_box.configure(state=state)
+        self.music_sidecars_box.configure(state=state)
         self.cancel_button.configure(state="normal" if busy else "disabled")
         if busy:
             self.progress.start(14)

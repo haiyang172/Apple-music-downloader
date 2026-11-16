@@ -17,7 +17,7 @@ _DEVICE = re.compile(
     re.IGNORECASE,
 )
 _OUTPUT_EXTENSIONS = {".m4a", ".flac", ".mp3", ".wav", ".opus", ".mp4", ".mkv", ".webm",
-                      ".ass", ".srt", ".jpg", ".png", ".json"}
+                      ".ass", ".srt", ".jpg", ".png", ".json", ".lrc"}
 
 
 def clean_name(text, limit=80):

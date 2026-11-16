@@ -20,8 +20,11 @@ from bili_resume import forget_resume
 from bili_sidecars import save_cover, save_danmaku, save_subtitle
 from engine import Cancelled
 from local_convert import convert_file
+from music_tagging import write_mp3_tags
+import netease_sidecars
 from netease_download import download_netease
 from qq_download import download_qq
+import qq_sidecars
 import settings
 from storage import clean_name, destination_for, download_cache, publish, volume_identity
 from youtube_download import download_youtube
@@ -93,6 +96,7 @@ def download_options(preferences):
             "bili_danmaku": preferences.get("bili_danmaku", False),
             "bili_subtitle": preferences.get("bili_subtitle", False),
             "bili_archive": preferences.get("bili_archive", False),
+            "music_sidecars": preferences.get("music_sidecars", False),
             "bili_auto_category": preferences.get("bili_auto_category", True),
             "bili_category_rules": 2,
             "youtube_mode": preferences.get("youtube_mode", "video"),
@@ -380,6 +384,34 @@ def _convert_local(store, task, target, disk, engine, stop, post):
     return int(written), int(not written), 0
 
 
+def _stage_music_sidecars(task, source, stage, stop, status, session):
+    provider = qq_sidecars if task.source == "qq" else netease_sidecars
+    attachments, errors = [], []
+    cover = None
+    for label, fetch in (("封面", provider.save_cover), ("歌词", provider.save_lyrics)):
+        if stop.is_set():
+            raise Cancelled()
+        try:
+            path = fetch(task.url, stage, stop, status, session=session)
+            if path is not None:
+                attachments.append((label, path))
+                if label == "封面":
+                    cover = path
+        except Cancelled:
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            errors.append(f"读取{label}失败 · {error}")
+    if stop.is_set():
+        raise Cancelled()
+    try:
+        if not source.resolve(strict=True).is_relative_to(stage.resolve(strict=True)):
+            raise ValueError("音频不在本次下载的暂存目录内。")
+        write_mp3_tags(source, task.title, task.artist, cover=cover)
+    except (MutagenError, OSError, ValueError) as error:
+        errors.append(f"写入音频标签失败 · {error}")
+    return attachments, errors
+
+
 def _download_web(store, task, target, disk, engine, stop, post, session):
     prefix = f"{task.position}/{task.total} · {task.title}" if task.position and task.total else task.title
     _record(store, task, post, "running")
@@ -391,6 +423,7 @@ def _download_web(store, task, target, disk, engine, stop, post, session):
         stage = Path(working)
         name = task.title
         preserved = True
+        attachments, errors = [], []
         if task.source == "youtube":
             mode = task.options.get("youtube_mode", "video")
             source = download_youtube(task.url, mode, stage, engine.ffmpeg, stop, status)
@@ -401,13 +434,33 @@ def _download_web(store, task, target, disk, engine, stop, post, session):
                               expected_duration=task.duration)
             if task.artist:
                 name = f"{task.artist} - {name}"
+            if task.options.get("music_sidecars"):
+                attachments, errors = _stage_music_sidecars(task, source, stage, stop, status, session)
         if stop.is_set():
             raise Cancelled()
         published, written = publish(source, target, name, str(task.id), expected_volume=disk)
         details = _audio_result(source, published.name, preserved=preserved)
-    _record(store, task, post, "complete", files=[str(published)], audio_details=details)
-    post("log", ("已保存  " if written else "已存在  ") + published.name)
-    return int(written), int(not written), 0
+        files = [str(published)]
+        saved, existing = int(written), int(not written)
+        post("log", ("已保存  " if written else "已存在  ") + published.name)
+        for label, path in attachments:
+            _record(store, task, post, "running", files=files, audio_details=details)
+            if stop.is_set():
+                raise Cancelled()
+            try:
+                attachment, written = publish(path, target, published.stem, str(task.id), expected_volume=disk)
+            except (OSError, RuntimeError, ValueError) as error:
+                errors.append(f"保存{label}失败 · {error}")
+            else:
+                files.append(str(attachment))
+                saved += int(written)
+                existing += int(not written)
+                post("log", ("已保存  " if written else "已存在  ") + attachment.name)
+    error = "\n".join(errors)
+    if error:
+        post("log", f"{task.title} · {error}")
+    _record(store, task, post, "failed" if errors else "complete", error=error, files=files, audio_details=details)
+    return saved, existing, int(bool(errors))
 
 
 def run_tasks(store, tasks, preferences, engine, login, stop, post, *, sessions=None):

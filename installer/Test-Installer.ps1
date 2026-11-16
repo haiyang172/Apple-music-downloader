@@ -926,13 +926,32 @@ try:
         assert url == qq_song and session == qq_session and expected_duration == 90
         return Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))
 
+    def music_cover(url, stage, stop, on_status, *, session=None):
+        return Path(shutil.copyfile(root / "assets/amdl-32.png", stage / "fixture-cover.png"))
+
+    def music_lyrics(url, stage, stop, on_status, *, session=None):
+        target = stage / "fixture.lrc"
+        target.write_text("[00:02.00]测试歌词\n", encoding="utf-8")
+        return target
+
     app.fields["folder"].set(str(profile))
     app.fields["category"].set("")
-    with patch.object(apple_download, "download_qq", side_effect=qq_fixture):
+    app.fields["music_sidecars"].set(True)
+    with patch.object(apple_download, "download_qq", side_effect=qq_fixture), \
+         patch.object(apple_download.qq_sidecars, "save_cover", side_effect=music_cover), \
+         patch.object(apple_download.qq_sidecars, "save_lyrics", side_effect=music_lyrics):
         browser._enqueue(True)
         wait_for(window, lambda: not app.busy)
     qq_task, = [task for task in app.queue_store.list_tasks() if task.source == "qq"]
     assert qq_task.state == "complete" and Path(qq_task.files[0]).name == "Artist - QQ Fixture.mp3"
+    mp3, artwork, lyrics = map(Path, qq_task.files)
+    assert artwork == mp3.with_suffix(".png") and lyrics == mp3.with_suffix(".lrc")
+    assert lyrics.read_text(encoding="utf-8").startswith("[00:02.00]")
+    tags = mutagen.File(mp3).tags
+    assert tags["TIT2"].text == ["QQ Fixture"] and tags["TPE1"].text == ["Artist"]
+    front_cover, = tags.getall("APIC")
+    assert front_cover.mime == "image/png" and front_cover.data == artwork.read_bytes()
+    app.fields["music_sidecars"].set(False)
     account.logout()
     assert not browser.rows and account.session is None and account.auth.load() is None
 
@@ -962,6 +981,7 @@ try:
         wait_for(window, lambda: not app.busy)
     song = app.queue_store.get(song.id)
     assert song.state == "complete" and Path(song.files[0]).name == "Artist - NetEase Fixture.mp3"
+    assert len(song.files) == 1 and Path(song.files[0]).read_bytes() == (profile / "local-test.mp3").read_bytes()
 
     netease_account = netease.account
     netease_session = NeteaseSession(12345, (("MUSIC_U", "isolated-fixture-netease-cookie"),))
@@ -985,13 +1005,20 @@ try:
         netease._open_selected()
         wait_for(window, lambda: netease.view == "tracks" and len(netease.rows) == 1 and not netease.busy)
         assert netease_reads.call_args.args[0] == netease_session
-    with patch.object(apple_download, "download_netease", return_value=profile / "local-test.mp3") as netease_download:
+    app.fields["music_sidecars"].set(True)
+    with patch.object(apple_download, "download_netease", side_effect=lambda url, stage, *args, **kwargs:
+                      Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))) as netease_download, \
+         patch.object(apple_download.netease_sidecars, "save_cover", side_effect=RuntimeError("封面网络错误")), \
+         patch.object(apple_download.netease_sidecars, "save_lyrics", side_effect=music_lyrics):
         netease._enqueue(True)
         wait_for(window, lambda: not app.busy)
         netease_download.assert_called_once()
         assert netease_download.call_args.kwargs["session"] == netease_session
-    assert any(item.source == "netease" and item.title == "NetEase Private Fixture" and item.state == "complete"
-               for item in app.queue_store.list_tasks())
+    private_task, = [item for item in app.queue_store.list_tasks() if item.title == "NetEase Private Fixture"]
+    assert private_task.state == "failed" and "封面网络错误" in private_task.error
+    assert [Path(name).suffix for name in private_task.files] == [".mp3", ".lrc"]
+    assert mutagen.File(private_task.files[0]).tags["TIT2"].text == ["NetEase Private Fixture"]
+    app.fields["music_sidecars"].set(False)
     netease_account.logout()
     assert not netease.rows and netease_account.auth.load() is None
 
@@ -1030,7 +1057,7 @@ try:
         assert app.active_page == "local"
 finally:
     app.close()
-print("Shared playlist routing, CSV export, QQ and NetEase QR sessions, personal playlists, and download queue passed.")
+print("QQ and NetEase routing, encrypted sessions, playlist queue, embedded art, lyrics, and partial failure passed.")
 
 window, app = new_window()
 try:
