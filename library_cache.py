@@ -1,4 +1,4 @@
-"""Store complete Apple Music list snapshots for fast local browsing."""
+"""Store complete list snapshots for fast local browsing."""
 
 from contextlib import closing, contextmanager
 import json
@@ -50,4 +50,10 @@ class LibraryCache:
                 ON CONFLICT (scope) DO UPDATE SET rows_json = excluded.rows_json
                 WHERE library_snapshots.rows_json != excluded.rows_json
             """, (scope, encoded)).rowcount
+        return bool(changed)
+
+    def discard(self, scope):
+        """Remove just the selected snapshot."""
+        with self._database() as db, db:
+            changed = db.execute("DELETE FROM library_snapshots WHERE scope = ?", (scope,)).rowcount
         return bool(changed)

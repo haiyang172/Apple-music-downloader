@@ -992,7 +992,9 @@ try:
     account = browser.account
     qq_session = QqSession("fixture1234", "isolated-fixture-qq-session", "Fixture account")
     login_image = QqQR((root / "assets/amdl-32.png").read_bytes(), "fixture-signature")
-    collection = {"id": "42", "dir_id": 0, "kind": "created", "title": "QQ 测试歌单", "total": 1, "url": url}
+    collection = {"id": "42", "tid": 42, "dir_id": 0, "kind": "created", "title": "QQ 测试歌单",
+                  "total": 1, "url": "https://y.qq.com/n/ryqq_v2/playlist/42", "private": False,
+                  "_account_id": qq_session.musicid}
     with patch.object(account.auth, "begin", return_value=login_image), \
          patch.object(qq_catalog, "list_playlists", return_value={"rows": [collection]}) as my_playlists:
         account.open()
@@ -1009,7 +1011,7 @@ try:
 
     qq_song = result["rows"][0]["url"]
     qq_playlist_result = dict(result, title=collection["title"], total=1, rows=[
-        dict(result["rows"][0], title="QQ Fixture"),
+        dict(result["rows"][0], title="QQ Fixture", source="qq", id="0039MnYb0qxYhV"),
     ])
     with patch.object(qq_catalog, "resolve_playlist", return_value=qq_playlist_result) as tracks:
         browser._open_selected()
@@ -1086,7 +1088,8 @@ try:
     netease_account = netease.account
     netease_session = NeteaseSession(12345, (("MUSIC_U", "isolated-fixture-netease-cookie"),))
     netease_qr = SimpleNamespace(url="https://music.163.com/login?codekey=fixture")
-    my_netease_playlist = {"id": "1234", "title": "网易云测试歌单", "kind": "liked", "total": 1, "url": ""}
+    my_netease_playlist = {"id": "1234", "title": "网易云测试歌单", "kind": "liked", "total": 1, "url": "",
+                          "private": True, "_account_id": netease_session.user_id}
     with patch.object(netease_account.auth, "begin", return_value=netease_qr), \
          patch.object(netease_catalog, "list_playlists", return_value={"rows": [my_netease_playlist]}) as netease_list:
         netease_account.open()
@@ -1101,7 +1104,7 @@ try:
         assert app.active_page == "netease"
 
     private_netease = dict(netease_result, title=my_netease_playlist["title"], url="", total=1, rows=[
-        dict(netease_result["rows"][0], title="NetEase Private Fixture"),
+        dict(netease_result["rows"][0], title="NetEase Private Fixture", source="netease", id="1973665667"),
     ])
     with patch.object(netease_catalog, "resolve_playlist", return_value=private_netease) as netease_reads:
         netease._open_selected()
@@ -1160,6 +1163,131 @@ try:
 finally:
     app.close()
 print("QQ and NetEase routing, encrypted sessions, playlist queue, embedded art, lyrics, and partial failure passed.")
+
+from contextlib import ExitStack
+from shared_music_cache import SharedMusicCache
+
+for source, catalog, session, verified_account, owner, other_owner, song_link in (
+    ("qq", qq_catalog, QqSession("2345678", "cache-fixture-qq-key", "Cache account"),
+     QqAccount("2345678", "Cache account"), "2345678", "3456789", "https://y.qq.com/n/ryqq_v2/songDetail/"),
+    ("netease", netease_catalog, NeteaseSession(2345678, (("MUSIC_U", "cache-fixture-netease-key"),)),
+     NeteaseAccount(2345678, "Cache account"), 2345678, 3456789, "https://music.163.com/song?id="),
+):
+    cache_path = settings.DATA / "shared-music.sqlite3"
+    private_cache = SharedMusicCache(cache_path)
+
+    def playlist(identifier, title):
+        base = {"id": str(identifier), "title": title, "kind": "created", "total": 2,
+                "private": source == "netease", "_account_id": owner,
+                "url": f"https://y.qq.com/n/ryqq_v2/playlist/{identifier}" if source == "qq" else ""}
+        if source == "qq":
+            base.update(tid=identifier, dir_id=0)
+        return base
+
+    def library(rows, warning=""):
+        return {"source": source, "view": "library", "title": "我的歌单", "rows": rows,
+                "total": len(rows), "warnings": [warning] if warning else []}
+
+    def track(number, position):
+        identifier = f"{number:014}" if source == "qq" else str(number)
+        return {"source": source, "id": identifier, "url": song_link + identifier, "title": f"缓存曲目 {number}",
+                "artist": "Cache Artist", "album": "Cache Album", "duration": 90, "position": position}
+
+    def tracks(rows):
+        return {"source": source, "title": second["title"], "rows": rows, "total": len(rows), "url": second["url"]}
+
+    first, second = playlist(43001, "上次的歌单"), playlist(43002, "选中的歌单")
+    old_tracks = [track(44001, 1), track(44002, 2)]
+    assert private_cache.replace(source, owner, library([first, second]))
+    assert private_cache.replace(source, owner, tracks(old_tracks), playlist=second)
+    assert private_cache.read(source, other_owner) is None
+
+    library_fetching, library_reply = threading.Event(), threading.Event()
+    track_fetching, track_reply = threading.Event(), threading.Event()
+
+    def incomplete_library(current, *, stop=None):
+        assert current == session
+        library_fetching.set()
+        assert library_reply.wait(10)
+        return library([first], "平台暂只返回部分歌单。")
+
+    def updated_tracks(current, selection, *, stop=None):
+        assert current == session and selection["id"] == second["id"]
+        track_fetching.set()
+        assert track_reply.wait(10)
+        return tracks([track(44002, 1), track(44003, 2)])
+
+    with ExitStack() as context:
+        for provider, auth in (("qq", Studio.QqAuth), ("netease", Studio.NeteaseAuth)):
+            context.enter_context(patch.object(auth, "load", return_value=session if provider == source else None))
+            context.enter_context(patch.object(auth, "check", return_value=verified_account if provider == source else None))
+        context.enter_context(patch.object(catalog, "list_playlists", side_effect=incomplete_library))
+        context.enter_context(patch.object(catalog, "resolve_playlist", side_effect=updated_tracks))
+        window, app = new_window()
+        try:
+            app.show(source)
+            browser = app.shared_music_browsers[source]
+            wait_for(window, lambda: library_fetching.is_set() and browser.view == "library" and len(browser.rows) == 2)
+            assert browser.private_refreshing and not browser.busy
+            selected = next(row for row, item in browser.rows.items() if item["id"] == second["id"])
+            browser.tree.selection_set(selected)
+            library_reply.set()
+            wait_for(window, lambda: not browser.private_refreshing)
+            assert browser.rows[browser.tree.selection()[0]]["id"] == second["id"]
+            assert [item["id"] for item in private_cache.read(source, owner)["rows"]] == [first["id"], second["id"]]
+
+            browser._open_selected()
+            wait_for(window, lambda: track_fetching.is_set() and browser.view == "tracks" and len(browser.rows) == 2)
+            assert browser.private_refreshing and not browser.busy
+            selected = next(row for row, item in browser.rows.items() if item["id"] == old_tracks[1]["id"])
+            browser.tree.selection_set(selected)
+            window.update()
+            assert str(browser.queue_button.cget("state")) == "normal"
+            track_reply.set()
+            wait_for(window, lambda: not browser.private_refreshing)
+            assert browser.rows[browser.tree.selection()[0]]["id"] == old_tracks[1]["id"]
+            assert [item["title"] for item in private_cache.read(source, owner, playlist=second)["rows"]] == [
+                "缓存曲目 44002", "缓存曲目 44003",
+            ]
+            browser.library_button.invoke()
+            wait_for(window, lambda: browser.view == "library" and not browser.private_refreshing)
+            expired = (qq_catalog.QqCatalogError("QQ 登录已过期", code=1000) if source == "qq"
+                       else netease_catalog.NeteaseCatalogError("网易云登录已过期", code=301))
+            with patch.object(catalog, "list_playlists", side_effect=expired):
+                browser.read_library()
+                wait_for(window, lambda: browser.account.session is None)
+            assert not browser.rows
+            assert "过期" in browser.account.status.get()
+
+            new_session = (replace(session, musicid=other_owner) if source == "qq"
+                           else replace(session, user_id=other_owner))
+            new_account = (replace(verified_account, musicid=other_owner) if source == "qq"
+                           else replace(verified_account, uid=other_owner))
+            switch_read, switch_reply = threading.Event(), threading.Event()
+
+            def empty_library(current, *, stop=None):
+                assert current == new_session
+                switch_read.set()
+                assert switch_reply.wait(10)
+                return library([])
+
+            with patch.object(catalog, "list_playlists", side_effect=empty_library):
+                browser.account.session, browser.account.account = new_session, new_account
+                browser.account.sync_button()
+                try:
+                    wait_for(window, switch_read.is_set)
+                    assert not browser.rows and browser.private_refreshing and browser.busy
+                finally:
+                    switch_reply.set()
+                wait_for(window, lambda: browser.view == "library" and not browser.private_refreshing)
+            assert private_cache.read(source, other_owner)["rows"] == [] and not browser.rows
+        finally:
+            library_reply.set()
+            track_reply.set()
+            app.close()
+    assert b"cache-fixture-qq-key" not in cache_path.read_bytes()
+    assert b"cache-fixture-netease-key" not in cache_path.read_bytes()
+print("Private QQ and NetEase caches appeared before refresh, retained complete lists on partial results, kept selection, and cleared on expiry.")
 
 window, app = new_window()
 try:

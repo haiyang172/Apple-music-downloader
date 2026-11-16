@@ -12,8 +12,10 @@ _WEB_OPTIONS = {"cv": 13020508, "v": 13020508}
 _TRACK_MID = re.compile(r"[A-Za-z0-9]{14}")
 _ENCODED_UIN = re.compile(r"[A-Za-z0-9_.~+\-/=]{1,128}")
 _AUTH_CODES = qq_auth.QQ_AUTH_EXPIRED_CODES | {1101, 80030}
+_ACCESS_DENIED = 10004
 _FAVORITE = 201
 _PAGE_SIZE = 100
+_COLLECTED_PAGE_SIZE = 80
 _MAX_PAGES = 100
 _SEARCH_PAGE_SIZE = 50
 _PUBLIC_BASE = "https://y.qq.com/n/ryqq_v2"
@@ -22,9 +24,11 @@ _PUBLIC_BASE = "https://y.qq.com/n/ryqq_v2"
 class QqCatalogError(RuntimeError):
     """QQ Music rejected a catalog request or returned unusable data."""
 
-    def __init__(self, message, *, code=None):
+    def __init__(self, message, *, code=None, denied=False):
         super().__init__(message)
         self.code = code
+        self.session_expired = code in _AUTH_CODES
+        self.authorization_denied = denied or self.session_expired or code == _ACCESS_DENIED
 
 
 def _number(value):
@@ -57,7 +61,7 @@ def _data(response, label):
     code = _number(response.get("code"))
     if code in _AUTH_CODES:
         raise QqCatalogError("QQ 音乐登录已失效，请重新扫码。", code=code)
-    if code == 10004:
+    if code == _ACCESS_DENIED:
         raise QqCatalogError("当前账号无法访问这个 QQ 音乐歌单。", code=code)
     data = response.get("data")
     if code != 0 or not isinstance(data, dict):
@@ -102,14 +106,20 @@ def _collected(session, stop):
     warnings = []
     rows = []
     seen = set()
-    for start in range(0, 80 * _MAX_PAGES, 80):
+    next_expected = False
+    incomplete = False
+    for start in range(0, _COLLECTED_PAGE_SIZE * _MAX_PAGES, _COLLECTED_PAGE_SIZE):
         _cancelled(stop)
         try:
-            response = qq_auth.qq_profile_request(session, "collected", start=start, end=start + 79)
+            response = qq_auth.qq_profile_request(session, "collected", start=start, end=start + _COLLECTED_PAGE_SIZE - 1)
             data = _data(response, "收藏歌单")
             page = _rows(data, "cdlist", "收藏歌单")
+            if len(page) > _COLLECTED_PAGE_SIZE:
+                raise QqCatalogError("QQ 音乐返回了不完整的收藏歌单分页。")
         except (qq_auth.QqAuthError, QqCatalogError) as error:
             _cancelled(stop)
+            if getattr(error, "authorization_denied", False):
+                raise
             warnings.append(str(error))
             break
         new = []
@@ -119,13 +129,20 @@ def _collected(session, stop):
                 new.append(item)
         rows.extend(new)
         has_more = _more(data, "has_more", "hasmore")
-        if not page or has_more == 0 or (has_more is None and len(page) < 80):
+        if not page and (next_expected or has_more not in (None, 0)):
+            warnings.append("QQ 音乐未返回收藏歌单的下一页。")
             break
-        if not new:
-            warnings.append("QQ 音乐重复返回收藏歌单，已保留读取到的部分。")
+        incomplete = incomplete or (bool(new) and len(new) < len(page))
+        if page and not new:
+            warnings.append("QQ 音乐重复返回收藏歌单或缺少歌单信息，已保留读取到的部分。")
             break
+        if not page or has_more == 0 or (has_more is None and len(page) < _COLLECTED_PAGE_SIZE):
+            break
+        next_expected = has_more not in (None, 0)
     else:
         warnings.append("收藏歌单数量超出单次读取范围。")
+    if incomplete and not warnings:
+        warnings.append("QQ 音乐未返回部分收藏歌单。")
     return rows, warnings
 
 
@@ -133,14 +150,17 @@ def list_playlists(session, *, stop=None):
     """List the signed-in account's created and collected playlists."""
     _cancelled(stop)
     if not isinstance(session, qq_auth.QqSession):
-        raise QqCatalogError("请先登录 QQ 音乐。")
+        raise QqCatalogError("请先登录 QQ 音乐。", denied=True)
     response = qq_auth.qq_music_request(session, _PLAYLIST_LIST, "GetPlaylistByUin", {"uin": session.musicid},
                                         common=_WEB_OPTIONS)
     created = _rows(_data(response, "自建歌单"), "v_playlist", "自建歌单")
     own = [item for raw in created if (item := _playlist(raw, "created", session))]
+    incomplete = len({item["id"] for item in own}) < len(created)
     if not any(item["kind"] == "liked" for item in own):
         own.insert(0, _playlist({"dirId": _FAVORITE}, "created", session))
     collected, warnings = _collected(session, stop)
+    if incomplete:
+        warnings.insert(0, "QQ 音乐未返回部分自建歌单。")
     _cancelled(stop)
     combined = {}
     for item in own + collected:
@@ -178,13 +198,16 @@ def _track(raw, position):
             "media_mid": media_mid if isinstance(media_mid, str) and _TRACK_MID.fullmatch(media_mid) else ""}
 
 
-def _playlist_tracks(playlist, identity, session, stop):
+def _playlist_tracks(playlist, identity, session, stop, *, private=False):
     rows = []
     title = playlist.get("title")
     total = playlist.get("total")
     position = 0
     warning = ""
     previous = None
+    reported_total = None
+    next_expected = False
+    incomplete = False
     for _ in range(_MAX_PAGES):
         _cancelled(stop)
         params = {**identity, "song_begin": position, "song_num": _PAGE_SIZE, "onlysonglist": True,
@@ -195,7 +218,8 @@ def _playlist_tracks(playlist, identity, session, stop):
             data = _data(response, "歌单曲目")
             page = _rows(data, "songlist", "歌单曲目")
         except (qq_auth.QqAuthError, QqCatalogError) as error:
-            if not rows or getattr(error, "code", None) in _AUTH_CODES:
+            if (not rows or getattr(error, "session_expired", False)
+                    or (private and getattr(error, "authorization_denied", False))):
                 raise
             warning = f"只读取到部分 QQ 音乐曲目。{error}"
             break
@@ -203,6 +227,8 @@ def _playlist_tracks(playlist, identity, session, stop):
         title = title or _text(info.get("title"))
         count = _number(data.get("total_song_num"))
         if count is not None and count >= 0:
+            incomplete = incomplete or (reported_total is not None and reported_total != count)
+            reported_total = count
             total = count
         tracks = [row for index, item in enumerate(page, position + 1) if (row := _track(item, index))]
         signature = tuple(row["id"] for row in tracks)
@@ -213,14 +239,21 @@ def _playlist_tracks(playlist, identity, session, stop):
         rows.extend(tracks)
         position += len(page)
         has_more = _more(data, "hasmore", "has_more")
+        if private:
+            incomplete = incomplete or len(page) > _PAGE_SIZE or bool(
+                (not page and (next_expected or has_more not in (None, 0)))
+                or (reported_total is not None
+                    and (position > reported_total or (position == reported_total and has_more not in (None, 0))))
+            )
         if not page or has_more == 0 or (total is not None and position >= total):
             break
         if has_more is None and total is None and len(page) < _PAGE_SIZE:
             break
+        next_expected = has_more not in (None, 0)
     else:
         warning = "歌单曲目数量超出单次读取范围。"
     _cancelled(stop)
-    if not warning and ((total is not None and len(rows) < total) or len(rows) < position):
+    if not warning and ((private and incomplete) or (total is not None and len(rows) < total) or len(rows) < position):
         warning = "QQ 音乐未返回部分曲目。"
     return {"source": "qq", "title": title or "QQ 音乐歌单", "url": playlist["url"],
             "total": max(total, len(rows)) if total is not None else len(rows), "rows": rows, "warning": warning}
@@ -230,19 +263,19 @@ def resolve_playlist(session, playlist, *, stop=None):
     """Resolve a playlist row returned for the current QQ Music account."""
     _cancelled(stop)
     if not isinstance(session, qq_auth.QqSession) or _record(playlist).get("_account_id") != session.musicid:
-        raise QqCatalogError("请先登录 QQ 音乐并刷新当前账号的歌单。")
+        raise QqCatalogError("请先登录 QQ 音乐并刷新当前账号的歌单。", denied=True)
     directory, tid = _number(playlist.get("dir_id")) or 0, _number(playlist.get("tid")) or 0
     kind = playlist.get("kind")
     if kind == "liked" or (kind == "created" and directory > 0 and (tid <= 0 or playlist.get("private"))):
-        return _playlist_tracks(playlist, _own_directory(session, directory), session, stop)
+        return _playlist_tracks(playlist, _own_directory(session, directory), session, stop, private=True)
     if tid <= 0 or kind not in {"created", "collected"}:
         raise QqCatalogError("QQ 音乐未返回有效的歌单编号。")
     try:
-        return _playlist_tracks(playlist, {"disstid": tid, "dirid": 0}, session, stop)
+        return _playlist_tracks(playlist, {"disstid": tid, "dirid": 0}, session, stop, private=True)
     except QqCatalogError as error:
-        if error.code != 10004 or kind != "created" or directory <= 0:
+        if error.code != _ACCESS_DENIED or kind != "created" or directory <= 0:
             raise
-    return _playlist_tracks(playlist, _own_directory(session, directory), session, stop)
+    return _playlist_tracks(playlist, _own_directory(session, directory), session, stop, private=True)
 
 
 def resolve_public_qq(value, *, session=None, stop=None):

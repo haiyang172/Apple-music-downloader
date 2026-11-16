@@ -176,7 +176,8 @@ $sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'download_queue.
     'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py',
     'bili_auth.py', 'qr_account_ui.py', 'bili_catalog.py', 'bili_collections.py', 'bili_download.py', 'bili_resume.py',
     'bili_sidecars.py', 'bili_ui.py',
-    'qq_auth.py', 'qq_catalog.py', 'qq_download.py', 'qq_sidecars.py', 'share_links.py', 'short_music_links.py', 'shared_music.py', 'shared_music_ui.py',
+    'qq_auth.py', 'qq_catalog.py', 'qq_download.py', 'qq_sidecars.py', 'share_links.py', 'short_music_links.py',
+    'shared_music.py', 'shared_music_cache.py', 'shared_music_ui.py',
     'local_convert.py', 'local_convert_ui.py', 'windows_drop.py', 'video_links_ui.py',
     'youtube_download.py', 'netease_auth.py', 'netease_catalog.py', 'netease_download.py', 'netease_sidecars.py', 'music_tagging.py', 'playlist_export.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }

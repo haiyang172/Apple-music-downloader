@@ -50,6 +50,7 @@ from round_theme import install as install_round_theme, sidebar_badge
 import settings
 from share_links import links_in_text
 from shared_music import queue_rows
+from shared_music_cache import SharedMusicCache
 from shared_music_ui import SharedMusicBrowser, public_music_source, resolve_public_music_link
 from storage import clean_name, destination_for
 from video_links_ui import VideoLinkPage, video_link_source
@@ -131,6 +132,7 @@ class Studio:
         self.music_auth = {"qq": QqAuth(settings.DATA / "qq-music-session.dat"),
                            "netease": NeteaseAuth(settings.DATA / "netease-music-session.dat")}
         self.library_cache = LibraryCache(settings.DATA / "library.sqlite3")
+        self.shared_music_cache = SharedMusicCache(settings.DATA / "shared-music.sqlite3")
         self.background = BG
         self.queue_store = QueueStore(settings.DATA / "downloads.sqlite3")
         recovered = self.queue_store.recover()
@@ -1762,6 +1764,10 @@ class Studio:
                 source, *result = value
                 if source in self.shared_music_browsers:
                     self.shared_music_browsers[source].receive(*result)
+            elif kind == "shared_music_private":
+                source, *result = value
+                if source in self.shared_music_browsers:
+                    self.shared_music_browsers[source].receive_private(*result)
             elif kind == "browser_batch":
                 browser, *result = value
                 browser.receive_batch(*result)

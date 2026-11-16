@@ -228,6 +228,15 @@ class QrAccountPanel:
         self.sync_button()
         self.show_signin("已退出登录。")
 
+    def expire(self):
+        if self.session is None:
+            return
+        self.close_worker()
+        self.session = self.account = None
+        self.restore_issue = "expired"
+        self.sync_button()
+        self.show_signin()
+
     def close_worker(self):
         self.stop.set()
         self.stop = threading.Event()

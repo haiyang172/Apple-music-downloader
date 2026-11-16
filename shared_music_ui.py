@@ -1,6 +1,8 @@
 """Search songs, browse shared links, and queue tracks."""
 
+from collections import defaultdict, deque
 import csv
+import sqlite3
 import threading
 import tkinter as tk
 from tkinter import filedialog, font, ttk
@@ -69,6 +71,13 @@ class SharedMusicBrowser:
         self.total = None
         self.view = "tracks"
         self.private_view = False
+        self.private_serial = 0
+        self.private_stop = threading.Event()
+        self.private_cache_access = threading.Lock()
+        self.private_refreshing = False
+        self.private_playlist = None
+        self.private_complete = False
+        self.private_position = None
         self.library = None
         self.library_position = None
         self.search_query = ""
@@ -232,19 +241,14 @@ class SharedMusicBrowser:
         self._search(self.search_query, self.next_search_offset)
 
     def _account_changed(self, session):
+        self._cancel_private()
         self.library = None
         self.library_position = None
         if session is not None:
             self.busy = False
             self.read_library()
-        elif session is None and self.private_view:
-            self.stop.set()
-            self.serial += 1
-            self.busy = self.appending = self.private_view = False
-            self.resolve_button.configure(state="normal")
-            self.library_button.configure(state="normal", text="我的歌单")
-            self._reset()
-            self._update_actions()
+        elif self.private_view:
+            self._hide_private()
 
     def read_library(self):
         if self._opening or self.app.closing:
@@ -253,22 +257,10 @@ class SharedMusicBrowser:
         if session is None:
             self.account.open()
             return
-        if self.library is not None and self.private_view and self.view == "tracks":
-            self._show(self.library)
-            if self.library_position is not None:
-                identifier, top = self.library_position
-                self.tree.selection_set(*(row for row, item in self.rows.items() if item["id"] == identifier))
-                self.tree.yview_moveto(top)
-            self._update_actions()
+        if self.private_refreshing and self.private_playlist is None:
             return
-
-        def fetch(stop):
-            data = self.catalog.list_playlists(session, stop=stop)
-            warnings = data.get("warnings") or ()
-            return dict(data, source=self.page_source, view="library", title="我的歌单",
-                        warning=data.get("warning") or " · ".join(warnings))
-
-        self._read(fetch, f"正在读取{SOURCES[self.page_source]}歌单…", private=True)
+        self._read_private(session, memory=self.library,
+                           position=self.library_position if self.private_view and self.view == "tracks" else None)
 
     def _open_playlist(self, row=None):
         if row is None:
@@ -276,9 +268,149 @@ class SharedMusicBrowser:
         if self.busy or row not in self.rows or self.account.session is None:
             return
         session, playlist = self.account.session, self.rows[row]
-        self.library_position = (playlist["id"], self.tree.yview()[0])
-        self._read(lambda stop: self.catalog.resolve_playlist(session, playlist, stop=stop),
-                   "正在读取歌单曲目…", private=True)
+        self.library_position = self._view_position()
+        self._read_private(session, playlist=playlist)
+
+    def _private_owner(self, session):
+        profile = self.account.account
+        if self.page_source == "qq":
+            owner = getattr(session, "musicid", None)
+            verified = getattr(profile, "musicid", None)
+        else:
+            owner = getattr(session, "user_id", None)
+            verified = getattr(profile, "uid", None)
+        return owner if owner and type(owner) is type(verified) and owner == verified else None
+
+    def _cancel_private(self):
+        self.private_stop.set()
+        self.private_serial += 1
+        self.private_refreshing = False
+
+    def _hide_private(self):
+        self._cancel_private()
+        self.busy = self.appending = self.private_view = self.private_complete = False
+        self.private_playlist = self.private_position = None
+        self._reset()
+        self._private_ready()
+
+    def _private_ready(self):
+        self.busy = False
+        self.resolve_button.configure(state="normal")
+        self.library_button.configure(state="normal")
+        self._update_actions()
+
+    def _private_result(self, data, playlist):
+        rows = data["rows"]
+        warning = data.get("warning") or " · ".join(data.get("warnings") or ())
+        if not warning and data.get("total") not in (None, len(rows)):
+            warning = "平台只返回了部分内容。"
+        data = dict(data, source=self.page_source, warning=warning)
+        if playlist is None:
+            data.update(view="library", title="我的歌单")
+        return data
+
+    def _read_private(self, session, *, playlist=None, memory=None, position=None):
+        preserve = self.private_view and self.view == "library" and playlist is None and memory is not None
+        self._cancel_private()
+        self.stop.set()
+        self.serial += 1
+        self.appending = False
+        self.private_view = self.private_refreshing = True
+        self.private_playlist, self.private_position = playlist, position
+        self.private_complete = False
+        self.private_stop = stop = threading.Event()
+        serial = self.private_serial
+        source = self.page_source
+        owner = self._private_owner(session)
+        if memory is not None:
+            self._paint_private(memory, preserve=preserve)
+        else:
+            self.busy = True
+            self._reset()
+            self.resolve_button.configure(state="disabled")
+            self.library_button.configure(state="disabled")
+            self._update_actions()
+            self.status.set("正在读取歌单曲目…" if playlist else f"正在读取{SOURCES[source]}歌单…")
+
+        def post(event, value):
+            if not stop.is_set():
+                self.app.post("shared_music_private", (source, serial, event, value))
+
+        def load():
+            cache = self.app.shared_music_cache
+            if owner is not None and (memory is None or memory.get("warning")):
+                try:
+                    with self.private_cache_access:
+                        cached = None if stop.is_set() else cache.read(source, owner, playlist=playlist)
+                    if cached is not None:
+                        post("cache", self._private_result(cached, playlist))
+                except (OSError, sqlite3.Error, ValueError):
+                    pass
+            if stop.is_set():
+                return
+            try:
+                result = (self.catalog.list_playlists(session, stop=stop) if playlist is None
+                          else self.catalog.resolve_playlist(session, playlist, stop=stop))
+                result = self._private_result(result, playlist)
+            except (OSError, RuntimeError, ValueError) as error:
+                if (owner is not None and getattr(error, "authorization_denied", False)
+                        and not getattr(error, "session_expired", False)):
+                    try:
+                        with self.private_cache_access:
+                            if not stop.is_set():
+                                cache.discard(source, owner, playlist=playlist)
+                    except (OSError, sqlite3.Error, ValueError):
+                        pass
+                post("error", error)
+            except Exception:
+                post("error", RuntimeError("读取失败，请重试。"))
+            else:
+                if owner is not None and not result["warning"]:
+                    try:
+                        with self.private_cache_access:
+                            if not stop.is_set():
+                                cache.replace(source, owner, result, playlist=playlist)
+                    except (OSError, sqlite3.Error, ValueError):
+                        pass
+                post("done", result)
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _paint_private(self, result, *, preserve=False):
+        self._show(result, preserve=preserve)
+        self.private_complete = not bool(result["warning"])
+        if self.private_position is not None:
+            self._restore_view_position(self.private_position)
+            self.private_position = None
+        self._private_ready()
+        if self.private_refreshing:
+            self.status.set("正在同步…" if not result["warning"] else result["warning"])
+
+    def receive_private(self, serial, event, value):
+        if serial != self.private_serial or self.app.closing or not self.private_refreshing:
+            return
+        if event == "cache":
+            self._paint_private(value, preserve=not self.busy)
+            return
+        self.private_refreshing = False
+        if event == "done":
+            if self.private_complete and value["warning"]:
+                self.status.set(f"保留上次完整列表 · {value['warning']}")
+            else:
+                self._paint_private(value, preserve=not self.busy)
+            return
+
+        message = str(value) or "读取失败，请重试。"
+        if getattr(value, "authorization_denied", False):
+            if self.private_playlist is None:
+                self.library = self.library_position = None
+            self._hide_private()
+            if getattr(value, "session_expired", False):
+                self.account.expire()
+        elif self.private_complete:
+            message = f"保留上次完整列表 · {message}"
+        self._private_ready()
+        self.status.set(message)
 
     def _reset(self):
         self.rows.clear()
@@ -295,14 +427,16 @@ class SharedMusicBrowser:
         self.count.set("")
         self.status.set("")
 
-    def _read(self, fetch, status, *, private=False, append=False):
+    def _read(self, fetch, status, *, append=False):
+        self._cancel_private()
         self.serial += 1
         serial = self.serial
         self.stop.set()
         self.stop = stop = threading.Event()
         self.busy = True
         self.appending = append
-        self.private_view = private
+        self.private_view = self.private_complete = False
+        self.private_playlist = self.private_position = None
         if not append:
             self.resolve_button.configure(state="disabled")
             if self.catalog is not None:
@@ -346,9 +480,48 @@ class SharedMusicBrowser:
             self._show(result, append=append)
         self._update_actions()
 
-    def _show(self, result, *, append=False):
+    @staticmethod
+    def _item_identity(item):
+        return item.get("id") or item.get("url") or item["title"]
+
+    def _view_position(self):
+        order = self.tree.get_children()
+        first = self.tree.yview()[0]
+        top = order[min(len(order) - 1, round(first * len(order)))] if order else ""
+        counts = defaultdict(int)
+        keys = {}
+        for row, item in self.rows.items():
+            identity = self._item_identity(item)
+            keys[row] = (identity, counts[identity])
+            counts[identity] += 1
+        return tuple(keys[row] for row in self.tree.selection() if row in keys), keys.get(self.tree.focus()), keys.get(top), first
+
+    def _restore_view_position(self, position):
+        selected, focus, top, first = position
+        counts = defaultdict(int)
+        lookup = {}
+        for row, item in self.rows.items():
+            identity = self._item_identity(item)
+            lookup[identity, counts[identity]] = row
+            counts[identity] += 1
+        self.tree.selection_set(*(lookup[key] for key in selected if key in lookup))
+        if focus in lookup:
+            self.tree.focus(lookup[focus])
+        if top in lookup:
+            self.tree.yview(self.tree.index(lookup[top]))
+        else:
+            self.tree.yview_moveto(first)
+
+    def _show(self, result, *, append=False, preserve=False):
+        previous = defaultdict(deque)
+        if preserve:
+            saved_view = self._view_position()
+            for row, item in self.rows.items():
+                previous[self._item_identity(item)].append(row)
+            rendered = {}
         if not append:
-            self._reset()
+            if not preserve:
+                self._reset()
             self.source = result["source"]
             self.view = result.get("view", "tracks")
             self.collection_url = _official_url(result.get("url"), self.source)
@@ -380,13 +553,27 @@ class SharedMusicBrowser:
                 duration = item["duration"] if item["duration"] is not None else "—"
             else:
                 duration = _duration(item.get("duration"))
-            row = self.tree.insert("", "end", values=(item.get("position") or "—", item["title"],
-                                                      item.get("artist") or "—", duration))
-            self.rows[row] = item
-        if len(self.rows) == 1 and not append:
+            values = (item.get("position") or "—", item["title"], item.get("artist") or "—", duration)
+            if preserve and (matches := previous[self._item_identity(item)]):
+                row = matches.popleft()
+                if self.rows[row] != item:
+                    self.tree.item(row, values=values)
+            else:
+                row = self.tree.insert("", "end", values=values)
+            if preserve:
+                rendered[row] = item
+            else:
+                self.rows[row] = item
+        if preserve:
+            self.tree.delete(*self.rows.keys() - rendered.keys())
+            self.rows = rendered
+            self.tree.set_children("", *rendered)
+        elif len(self.rows) == 1 and not append:
             self.tree.selection_set(next(iter(self.rows)))
         self.sort.apply()
-        if anchor:
+        if preserve:
+            self._restore_view_position(saved_view)
+        elif anchor:
             self.tree.see(anchor)
         count, total = len(self.rows), self.total
         if search:
@@ -462,6 +649,7 @@ class SharedMusicBrowser:
 
     def close(self):
         self.stop.set()
+        self._cancel_private()
         if self.catalog is not None:
             self.account.close()
 

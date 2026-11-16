@@ -14,14 +14,17 @@ _MAX_SEARCH_OFFSET = 10_000
 _PRIVATE = 10
 _LIKED = 5
 _AUTH_CODES = {301, 401}
+_ACCESS_DENIED = {403, 404}
 
 
 class NeteaseCatalogError(RuntimeError):
     """NetEase rejected a catalog read or returned unusable data."""
 
-    def __init__(self, message, *, code=None):
+    def __init__(self, message, *, code=None, denied=False):
         super().__init__(message)
         self.code = code
+        self.session_expired = code in _AUTH_CODES
+        self.authorization_denied = denied or self.session_expired or code in _ACCESS_DENIED
 
 
 def _number(value):
@@ -49,7 +52,7 @@ def _checked(response, label):
     code = _number(response.get("code"))
     if code in _AUTH_CODES:
         raise NeteaseCatalogError("网易云音乐登录已失效，请重新扫码。", code=code)
-    if code in {403, 404}:
+    if code in _ACCESS_DENIED:
         raise NeteaseCatalogError(f"当前账号无法访问网易云音乐{label}。", code=code)
     if code != 200:
         raise NeteaseCatalogError(f"暂时无法读取网易云音乐{label}。", code=code)
@@ -58,7 +61,7 @@ def _checked(response, label):
 
 def _account(session):
     if not isinstance(session, netease_auth.NeteaseSession) or not _number(session.user_id):
-        raise NeteaseCatalogError("请先登录网易云音乐。")
+        raise NeteaseCatalogError("请先登录网易云音乐。", denied=True)
     return int(session.user_id)
 
 
@@ -81,11 +84,17 @@ def list_playlists(session, *, stop=None):
     _cancelled(stop)
     user_id = _account(session)
     account = _checked(netease_auth.netease_api_request(session, "/api/nuser/account/get"), "个人资料")
-    if _number(_record(account.get("profile")).get("userId")) != user_id:
+    profile = account.get("profile")
+    returned_id = _number(_record(profile).get("userId"))
+    if ("profile" in account and profile is None) or (returned_id and returned_id != user_id):
         raise NeteaseCatalogError("网易云音乐登录已失效，请重新扫码。", code=301)
+    if returned_id != user_id:
+        raise NeteaseCatalogError("网易云音乐未返回有效的个人资料。")
 
     warning = ""
     playlists = {}
+    incomplete = False
+    next_expected = False
     for offset in range(0, _MAX_PAGES * _PAGE_SIZE, _PAGE_SIZE):
         _cancelled(stop)
         try:
@@ -93,10 +102,11 @@ def list_playlists(session, *, stop=None):
                                                        {"uid": user_id, "limit": _PAGE_SIZE, "offset": offset})
             data = _checked(response, "歌单")
             page = data.get("playlist")
-            if not isinstance(page, list):
+            if not isinstance(page, list) or len(page) > _PAGE_SIZE:
                 raise NeteaseCatalogError("网易云音乐未返回歌单列表。")
         except (netease_auth.NeteaseAuthError, NeteaseCatalogError) as error:
-            if not playlists or getattr(error, "code", None) in _AUTH_CODES:
+            _cancelled(stop)
+            if not playlists or getattr(error, "authorization_denied", False):
                 raise
             warning = f"只读取到部分网易云音乐歌单。{error}"
             break
@@ -105,14 +115,22 @@ def list_playlists(session, *, stop=None):
             if entry := _playlist(item, user_id):
                 playlists.setdefault(entry["id"], entry)
         more = data.get("more")
+        if not page and (next_expected or more is True or _number(more) not in (None, 0)):
+            warning = "网易云音乐未返回歌单的下一页。"
+            break
+        added = len(playlists) - previous
+        if page and not added:
+            warning = "网易云音乐重复返回歌单或缺少歌单信息，已保留读取到的部分。"
+            break
+        incomplete = incomplete or added < len(page)
         if not page or more is False or _number(more) == 0 or (more is None and len(page) < _PAGE_SIZE):
             break
-        if len(playlists) == previous:
-            warning = "网易云音乐重复返回歌单，已保留读取到的部分。"
-            break
+        next_expected = more is True or _number(more) not in (None, 0)
     else:
         warning = "歌单数量超出单次读取范围。"
     _cancelled(stop)
+    if incomplete and not warning:
+        warning = "网易云音乐未返回部分歌单。"
     rows = sorted(playlists.values(), key=lambda item: item["kind"] != "liked")
     return {"source": "netease", "rows": rows, "total": len(rows), "warnings": [warning] if warning else []}
 
@@ -187,13 +205,17 @@ def _read_playlist(identifier, selection, session, stop, *, public=False):
     songs = _tracks_by_id(detail.get("tracks"))
     total = _number(detail.get("trackCount"))
     entries = detail.get("trackIds")
+    warning = ""
     if not isinstance(entries, list):
         if not songs and total != 0:
             raise NeteaseCatalogError("网易云音乐未返回歌单中的曲目编号。")
+        if not public and total is None:
+            warning = "网易云音乐未确认返回的歌单曲目是否完整。"
         entries = [{"id": track_id} for track_id in songs]
     ids = [_number(_record(track).get("id")) for track in entries]
+    if not public and total is not None and len(ids) != total:
+        warning = "网易云音乐返回的曲目数量与歌单不符。"
     missing = list(dict.fromkeys(track_id for track_id in ids if track_id and track_id not in songs))
-    warning = ""
     for offset in range(0, len(missing), _PAGE_SIZE):
         _cancelled(stop)
         batch = missing[offset:offset + _PAGE_SIZE]
@@ -204,7 +226,8 @@ def _read_playlist(identifier, selection, session, stop, *, public=False):
             if not isinstance(data.get("songs"), list):
                 raise NeteaseCatalogError("网易云音乐未返回歌曲详情。")
         except (netease_auth.NeteaseAuthError, NeteaseCatalogError) as error:
-            if not songs or getattr(error, "code", None) in _AUTH_CODES:
+            if (not songs or getattr(error, "session_expired", False)
+                    or (not public and getattr(error, "authorization_denied", False))):
                 raise
             warning = f"只读取到部分网易云音乐曲目。{error}"
             break
@@ -226,7 +249,7 @@ def resolve_playlist(session, playlist, *, stop=None):
     user_id = _account(session)
     selection = _record(playlist)
     if selection.get("_account_id") != user_id:
-        raise NeteaseCatalogError("请刷新当前账号的网易云音乐歌单。")
+        raise NeteaseCatalogError("请刷新当前账号的网易云音乐歌单。", denied=True)
     identifier = _number(selection.get("id"))
     if not identifier:
         raise NeteaseCatalogError("网易云音乐未返回有效的歌单编号。")
