@@ -19,6 +19,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from music_catalog import CatalogClient, CatalogError, artwork_url_at_size
 from music_library import LibraryClient
 from round_theme import music_placeholder
+from share_links import links_in_text
 
 
 FILTERS = {"song": "歌曲", "album": "专辑", "playlist": "歌单"}
@@ -485,7 +486,7 @@ class MusicBrowser:
 
     def search(self, _event=None):
         term = self.query.get().strip()
-        if term != PLACEHOLDER and term.startswith("https://"):
+        if "://" in term and (term.startswith("https://") or links_in_text(term, self.app.link_source)):
             self.app.add_link_text(term, begin=False)
             return
         self.term = term if term != PLACEHOLDER else ""

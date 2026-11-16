@@ -23,9 +23,10 @@ _POLL = "/api/login/qrcode/client/login"
 _ACCOUNT = "/api/nuser/account/get"
 _USER_PLAYLISTS = "/api/user/playlist"
 _SONG_SEARCH = "/api/cloudsearch/pc"
+_PUBLIC_PLAYLIST_ROUTES = frozenset({"/api/v6/playlist/detail", "/api/v3/song/detail"})
 _AUTH_ROUTES = frozenset({_UNIQUE_KEY, _POLL})
-_API_ROUTES = frozenset({_ACCOUNT, _USER_PLAYLISTS, _SONG_SEARCH, "/api/playlist/detail", "/api/v6/playlist/detail",
-                         "/api/song/detail", "/api/v3/song/detail", "/api/song/enhance/player/url"})
+_API_ROUTES = _PUBLIC_PLAYLIST_ROUTES | {_ACCOUNT, _USER_PLAYLISTS, _SONG_SEARCH, "/api/playlist/detail",
+                                         "/api/song/detail", "/api/song/enhance/player/url"}
 _USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
@@ -163,6 +164,13 @@ def netease_search_request(query, offset, limit, *, session=None):
     if session is None:
         return _request(_SONG_SEARCH, params)
     return netease_api_request(session, _SONG_SEARCH, params)
+
+
+def netease_public_playlist_request(path, params):
+    """Read public playlist metadata or its track records without a session."""
+    if path not in _PUBLIC_PLAYLIST_ROUTES:
+        raise ValueError("无效的网易云音乐公开歌单接口。")
+    return _request(path, params)
 
 
 def _account(cookies):

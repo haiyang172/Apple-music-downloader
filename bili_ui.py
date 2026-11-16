@@ -8,6 +8,7 @@ import bili_catalog
 import bili_collections
 from music_browser import TreeSort
 from qr_account_ui import BiliAccountPanel
+from share_links import links_in_text
 
 
 def _video_duration(value):
@@ -120,8 +121,12 @@ class BiliBrowser:
             self.status.set("请先输入视频、合集、系列或收藏夹链接。")
             self.entry.focus_set()
             return "break"
+        links = links_in_text(value, lambda link: bili_catalog.is_video_link(link) or bili_collections.is_collection_link(link))
+        if len(links) != 1:
+            self.status.set("请一次粘贴一个 B 站视频、合集、系列或收藏夹链接。")
+            return "break"
         self.parent_view = None
-        self._read(value)
+        self._read(links[0])
         return "break"
 
     def load_link(self, value):

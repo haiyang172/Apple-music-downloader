@@ -43,11 +43,13 @@ from playlist_export import save_m3u8
 from qq_auth import QqAuth
 from round_theme import install as install_round_theme, sidebar_badge
 import settings
-from shared_music import shared_music_source
-from shared_music_ui import SharedMusicBrowser
+from share_links import links_in_text
+from shared_music import queue_rows
+from shared_music_ui import SharedMusicBrowser, public_music_source, resolve_public_music_link
 from storage import clean_name, destination_for
 from video_links_ui import VideoLinkPage, video_link_source
 from windows_drop import install_drop_target
+from youtube_download import resolve_youtube
 
 
 QUALITY = {"AAC": "AAC-LC · 兼容", "ALAC": "ALAC · 无损", "ATMOS": "Dolby Atmos"}
@@ -789,12 +791,27 @@ class Studio:
         self.update_queue_count()
         self.status.set(f"已按当前设置重新排队 {len(tasks)} 首")
 
+    @staticmethod
+    def link_source(value):
+        if "\n" in value or "\r" in value:
+            return None
+        if is_video_link(value) or is_collection_link(value):
+            return "bilibili"
+        source = public_music_source(value) or video_link_source(value)
+        if source:
+            return source
+        try:
+            read_links(value)
+        except ValueError:
+            return None
+        return SOURCE
+
     def add_link_text(self, text, begin=False):
         if self.resolving_links:
             self.status.set("正在读取上一批链接…")
             self.show("download")
             return False
-        links = list(dict.fromkeys(line.strip() for line in text.splitlines() if line.strip()))
+        links = list(dict.fromkeys(link for line in text.splitlines() for link in links_in_text(line, self.link_source)))
         if not links:
             self.error("添加链接", "请粘贴受支持的音乐或视频链接。")
             return False
@@ -803,15 +820,14 @@ class Studio:
             if is_collection_link(link):
                 self.show("bilibili")
                 return self.bili_browser.load_link(link)
-            source = shared_music_source(link)
-            if source:
+            source = self.link_source(link)
+            if source in self.shared_music_browsers:
                 browser = self.shared_music_browsers[source]
                 self.show(source)
                 browser.link.set(link)
                 browser.resolve()
                 return True
-            source = video_link_source(link)
-            if source:
+            if source in self.video_link_pages:
                 self.show(source)
                 self.video_link_pages[source].load_link(link)
                 return True
@@ -821,6 +837,7 @@ class Studio:
         self.status.set("正在读取链接…")
         region = self.catalog_region()
         bili_session = self.bili_browser.account.session
+        music_sessions = {source: browser.account.session for source, browser in self.shared_music_browsers.items()}
 
         def resolve():
             rows, errors = [], []
@@ -828,6 +845,7 @@ class Studio:
                 if self.closing:
                     return
                 try:
+                    source = self.link_source(link)
                     if is_collection_link(link):
                         collection = resolve_collection(link, session=bili_session, stop=self.links_stop)
                         rows.extend(collection["rows"])
@@ -835,6 +853,19 @@ class Studio:
                             errors.append(collection["warning"])
                     elif is_video_link(link):
                         rows.extend(resolve_video(link, session=bili_session)["rows"])
+                    elif source in music_sessions:
+                        result = resolve_public_music_link(link, session=music_sessions[source], stop=self.links_stop)
+                        rows.extend(queue_rows(source, result["rows"], collection_url=result["url"],
+                                               batch_title=result["title"], total=result.get("total")))
+                        if result.get("warning"):
+                            errors.append(result["warning"])
+                    elif source == "youtube":
+                        result = resolve_youtube(link, stop=self.links_stop)
+                        rows.extend(result["rows"])
+                        if result.get("warning"):
+                            errors.append(result["warning"])
+                    elif source == "douyin":
+                        errors.append("请在抖音页面保存作品后导入文件。")
                     else:
                         apple_link, = read_links(link)
                         rows.extend(dict(row, source=SOURCE) for row in expand_link(apple_link, self.catalog, region))

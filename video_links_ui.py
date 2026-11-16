@@ -7,6 +7,8 @@ from tkinter import ttk
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 import webbrowser
 
+from share_links import links_in_text
+
 
 SOURCES = {"youtube": "YouTube", "douyin": "抖音"}
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
@@ -138,7 +140,7 @@ class VideoLinkPage:
 
     def _update_link(self, *_):
         value = self.link.get().strip()
-        recognized = video_link_source(value) == self.source
+        recognized = self._page_link(value) is not None
         self.open_button.configure(state="normal" if recognized else "disabled")
         query = self.source == "youtube" and not recognized and self._is_search(value)
         invalid = value and not (recognized or query)
@@ -156,12 +158,15 @@ class VideoLinkPage:
     def _is_search(value):
         return bool(value and "://" not in value and not value.startswith("www."))
 
+    def _page_link(self, value):
+        links = links_in_text(value, lambda link: video_link_source(link) == self.source)
+        return _parse_video_link(links[0])[1] if len(links) == 1 else None
+
     def load_link(self, value):
         self.link.set(value)
 
     def open_original(self, _event=None):
-        parsed = _parse_video_link(self.link.get())
-        url = parsed[1] if parsed and parsed[0] == self.source else ""
+        url = self._page_link(self.link.get())
         if self.source == "youtube" and self.search_query:
             selection = self.tree.selection()
             item = self.rows.get(selection[0]) if len(selection) == 1 else None
@@ -245,13 +250,12 @@ class VideoLinkPage:
         if self.busy or self.app.closing:
             return "break"
         value = self.link.get().strip()
-        parsed = _parse_video_link(value)
-        linked = parsed is not None and parsed[0] == self.source
-        if linked or (parsed is None and self._is_search(value)):
+        link = self._page_link(value)
+        if link or self._is_search(value):
             self._clear_results()
-            if not linked:
+            if not link:
                 self.search_query = value
-            self._read(parsed[1] if linked else value)
+            self._read(link or value)
         return "break"
 
     def _scroll_changed(self, first, last):

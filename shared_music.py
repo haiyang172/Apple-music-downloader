@@ -84,6 +84,29 @@ def shared_music_source(value):
     return source
 
 
+def queue_rows(source, rows, *, collection_url="", batch_title="", total=None, private=False):
+    """Turn public or personal track rows into canonical queue items."""
+    try:
+        collection = _parse_link(collection_url)
+    except ValueError:
+        collection = None
+    playlist = private or (collection is not None and collection[0] == source and collection[1] == "playlist")
+    group = collection[3] if collection else batch_title
+    for row in rows:
+        try:
+            provider, kind, _, url = _parse_link(row.get("url"))
+        except ValueError:
+            continue
+        if provider != source or kind != "song":
+            continue
+        item = dict(row, source=source, url=url)
+        if playlist:
+            item.update(batch_key=f"{source}:{group}", batch_title=batch_title, total=total)
+        else:
+            item.pop("position", None)
+        yield item
+
+
 class _PageRedirect(HTTPRedirectHandler):
     max_redirections = 3
     max_repeats = 1

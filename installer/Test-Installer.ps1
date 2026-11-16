@@ -651,7 +651,7 @@ try:
         assert app.bili_auth.load() == session
         assert b"fixture-account-session" not in app.bili_auth.path.read_bytes()
         account.close()
-    browser.link.set("BV1GJ411x7h7")
+    browser.link.set("【哔哩哔哩】分享作品 https://www.bilibili.com/video/BV1GJ411x7h7）。")
     browser.resolve()
     wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
     assert browser.caption.get() == "公开演出合集"
@@ -871,7 +871,7 @@ try:
          "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"},
     ]}
     with patch.object(qq_catalog, "resolve_public_qq", return_value=result):
-        assert app.add_link_text(url)
+        assert app.add_link_text(f"【QQ 音乐】给你分享一张歌单：{url}！")
         browser = app.shared_music_browsers["qq"]
         wait_for(window, lambda: len(browser.rows) == 1 and not browser.busy)
     assert app.active_page == "qq" and "1 / 5" in browser.count.get()
@@ -931,8 +931,8 @@ try:
     netease_result = dict(result, source="netease", url=netease_url, rows=[
         dict(result["rows"][0], title="NetEase Fixture", url=netease_song),
     ])
-    with patch.object(shared_music, "resolve_music", return_value=netease_result):
-        assert app.add_link_text(netease_url)
+    with patch.object(netease_catalog, "resolve_public_netease", return_value=netease_result):
+        assert app.add_link_text(f"这张歌单不错 https://music.163.com/#/playlist?id=3778678。")
         wait_for(window, lambda: len(app.shared_music_browsers["netease"].rows) == 1)
     assert app.active_page == "netease"
 
@@ -988,7 +988,7 @@ try:
     youtube_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
     youtube_row = {"source": "youtube", "title": "YouTube Fixture", "artist": "Channel", "url": youtube_url}
     with patch.object(youtube_download, "resolve_youtube", return_value={"title": youtube_row["title"], "rows": [youtube_row]}):
-        assert app.add_link_text("https://youtu.be/jNQXAC9IVRw")
+        assert app.add_link_text("推荐一个 YouTube 视频〈https://youtu.be/jNQXAC9IVRw〉")
         youtube = app.video_link_pages["youtube"]
         youtube.resolve()
         wait_for(window, lambda: len(youtube.rows) == 1 and not youtube.busy)
@@ -1008,8 +1008,12 @@ try:
 
     with patch.object(video_links_ui.webbrowser, "open") as opened:
         assert app.add_link_text("https://youtu.be/dQw4w9WgXcQ") and app.active_page == "youtube"
-        assert app.add_link_text("https://www.douyin.com/video/7431386431445384474") and app.active_page == "douyin"
+        douyin_url = "https://www.douyin.com/video/7431386431445384474"
+        assert app.add_link_text(f"复制打开抖音，看看作品：{douyin_url}！") and app.active_page == "douyin"
         opened.assert_not_called()
+        app.video_link_pages["douyin"].load_link("复制打开抖音 https://v.douyin.com/Qa23px/。")
+        app.video_link_pages["douyin"].open_original()
+        opened.assert_called_once_with("https://v.douyin.com/Qa23px/")
     with patch.object(app.local_converter, "choose_files") as choose:
         app.video_link_pages["douyin"].import_saved()
         choose.assert_called_once_with()
@@ -1115,6 +1119,39 @@ try:
 finally:
     app.close()
 print("YouTube search, scroll continuation, retry, selected download, and original link passed.")
+
+from share_links import links_in_text
+from short_music_links import short_music_source
+
+assert not links_in_text("https://sample.invalid/?redirect=https://youtu.be/jNQXAC9IVRw", Studio.Studio.link_source)
+assert not links_in_text("复制链接：https://music.163.com.example.org/song?id=1！", Studio.Studio.link_source)
+assert short_music_source("https://c6.y.qq.com/base/fcgi-bin/u?__=ydKD1qUQ0Sd7") == "qq"
+assert short_music_source("https://163cn.tv/jM4PL2") == "netease"
+assert short_music_source("https://163cn.tv@example.org/jM4PL2") is None
+
+window, app = new_window()
+try:
+    qq_song_url = "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"
+    netease_song_url = "https://music.163.com/song?id=22197007"
+    youtube_video_url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+    before = len(app.tasks)
+
+    def public_music(url, *, session, stop):
+        source = app.link_source(url)
+        return {"source": source, "title": source, "url": url, "total": 1,
+                "rows": [{"url": url, "title": source, "position": 1}]}
+
+    with patch.object(Studio, "resolve_public_music_link", side_effect=public_music) as music, \
+         patch.object(Studio, "resolve_youtube", return_value={"title": "视频", "rows": [
+             {"source": "youtube", "url": youtube_video_url, "title": "视频"}]}):
+        assert app.add_link_text(f"分享歌曲《晴天》{qq_song_url}！\n推荐{netease_song_url}。\n<{youtube_video_url}>\n{qq_song_url}")
+        wait_for(window, lambda: not app.resolving_links)
+        assert music.call_count == 2
+    assert len(app.tasks) == before + 3
+    assert {task.source for task in list(app.tasks.values())[-3:]} == {"qq", "netease", "youtube"}
+finally:
+    app.close()
+print("Mobile share text, trusted-host handling, official short-link recognition and multi-source queue passed.")
 
 web = backend / "web"
 for command, version in (

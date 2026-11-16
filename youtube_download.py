@@ -46,7 +46,7 @@ def _parse(value):
         except ValueError:
             host = None
         if host in _HOSTS and target.scheme == "https" and target.netloc.lower() == host:
-            if host == "www.youtube.com" and target.path in ("/playlist", "/playlist/"):
+            if host != "youtu.be" and target.path in ("/playlist", "/playlist/"):
                 ids = query.get("list", ())
                 if len(ids) == 1 and _PLAYLIST_ID.fullmatch(ids[0]):
                     return "playlist", ids[0], f"{_BASE}/playlist?list={ids[0]}"
@@ -56,7 +56,7 @@ def _parse(value):
                 ids = query.get("v", ())
                 candidate = ids[0] if len(ids) == 1 else ""
             else:
-                match = re.fullmatch(r"/(?:shorts|embed|v)/([^/]+)/?", target.path)
+                match = re.fullmatch(r"/(?:shorts|live|embed|v)/([^/]+)/?", target.path)
                 candidate = match[1] if match else ""
             if _VIDEO_ID.fullmatch(candidate):
                 return "video", candidate, _watch(candidate)

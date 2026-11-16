@@ -1,9 +1,10 @@
-"""Search NetEase Cloud Music and read a signed-in account's playlists."""
+"""Search NetEase Cloud Music and read public or account playlists."""
 
 import json
 import re
 
 import netease_auth
+import shared_music
 
 
 _BASE = "https://music.163.com"
@@ -170,20 +171,19 @@ def _tracks_by_id(tracks):
             and (identifier := _number(song.get("id"))) and _text(song.get("name"))}
 
 
-def resolve_playlist(session, playlist, *, stop=None):
-    """Read one playlist returned for this account, in its original order."""
-    _cancelled(stop)
-    user_id = _account(session)
-    selection = _record(playlist)
-    if selection.get("_account_id") != user_id:
-        raise NeteaseCatalogError("请刷新当前账号的网易云音乐歌单。")
-    identifier = _number(selection.get("id"))
-    if not identifier:
-        raise NeteaseCatalogError("网易云音乐未返回有效的歌单编号。")
-    response = netease_auth.netease_api_request(session, "/api/v6/playlist/detail", {"id": identifier})
+def _read_playlist(identifier, selection, session, stop, *, public=False):
+    def request(path, params):
+        if session is None:
+            return netease_auth.netease_public_playlist_request(path, params)
+        return netease_auth.netease_api_request(session, path, params)
+
+    response = request("/api/v6/playlist/detail", {"id": identifier})
     detail = _record(_checked(response, "歌单曲目").get("playlist"))
     if _number(detail.get("id")) != identifier:
         raise NeteaseCatalogError("网易云音乐未返回所选歌单。")
+    private = selection.get("private") or _number(detail.get("privacy")) == _PRIVATE
+    if public and private:
+        raise ValueError("这是私密歌单，请从网易云音乐资料库中打开。")
     songs = _tracks_by_id(detail.get("tracks"))
     total = _number(detail.get("trackCount"))
     entries = detail.get("trackIds")
@@ -199,7 +199,7 @@ def resolve_playlist(session, playlist, *, stop=None):
         batch = missing[offset:offset + _PAGE_SIZE]
         query = json.dumps([{"id": track_id} for track_id in batch], separators=(",", ":"))
         try:
-            response = netease_auth.netease_api_request(session, "/api/v3/song/detail", {"c": query})
+            response = request("/api/v3/song/detail", {"c": query})
             data = _checked(response, "歌曲详情")
             if not isinstance(data.get("songs"), list):
                 raise NeteaseCatalogError("网易云音乐未返回歌曲详情。")
@@ -215,7 +215,35 @@ def resolve_playlist(session, playlist, *, stop=None):
     total = max(total or 0, len(ids))
     if not warning and len(rows) < total:
         warning = "网易云音乐未返回部分曲目。"
-    private = selection.get("private") or _number(detail.get("privacy")) == _PRIVATE
-    return {"source": "netease", "title": _text(detail.get("name")) or selection["title"],
+    return {"source": "netease", "title": _text(detail.get("name")) or selection.get("title") or "网易云音乐歌单",
             "url": "" if private else f"{_BASE}/playlist?id={identifier}", "total": total,
             "rows": rows, "warning": warning}
+
+
+def resolve_playlist(session, playlist, *, stop=None):
+    """Read one playlist returned for this account, in its original order."""
+    _cancelled(stop)
+    user_id = _account(session)
+    selection = _record(playlist)
+    if selection.get("_account_id") != user_id:
+        raise NeteaseCatalogError("请刷新当前账号的网易云音乐歌单。")
+    identifier = _number(selection.get("id"))
+    if not identifier:
+        raise NeteaseCatalogError("网易云音乐未返回有效的歌单编号。")
+    return _read_playlist(identifier, selection, session, stop)
+
+
+def resolve_public_netease(value, *, session=None, stop=None):
+    """Open an official sharing link, expanding public playlists in order."""
+    _cancelled(stop)
+    source, kind, identifier, url = shared_music._parse_link(value)
+    if source != "netease":
+        raise ValueError("请输入网易云音乐歌曲或歌单链接。")
+    if kind == "playlist":
+        try:
+            return _read_playlist(int(identifier), {}, session, stop, public=True)
+        except (netease_auth.NeteaseAuthError, NeteaseCatalogError):
+            _cancelled(stop)
+    result = shared_music.resolve_music(url)
+    _cancelled(stop)
+    return result

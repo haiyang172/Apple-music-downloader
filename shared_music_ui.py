@@ -12,12 +12,25 @@ import qq_catalog
 import shared_music
 from music_browser import TreeSort, _duration
 from qr_account_ui import NeteaseAccountPanel, QqAccountPanel
+from share_links import links_in_text
+from short_music_links import expand_short_music_link, short_music_source
 
 
 SOURCES = {"qq": "QQ 音乐", "netease": "网易云音乐"}
 OFFICIAL_HOSTS = {"qq": {"y.qq.com"}, "netease": {"music.163.com"}}
 CATALOGS = {"qq": qq_catalog, "netease": netease_catalog}
 ACCOUNT_PANELS = {"qq": QqAccountPanel, "netease": NeteaseAccountPanel}
+
+
+def public_music_source(value):
+    return shared_music.shared_music_source(value) or short_music_source(value)
+
+
+def resolve_public_music_link(value, *, session=None, stop=None):
+    link = expand_short_music_link(value, stop=stop)
+    if shared_music.shared_music_source(link) == "qq":
+        return qq_catalog.resolve_public_qq(link, session=session, stop=stop)
+    return netease_catalog.resolve_public_netease(link, session=session, stop=stop)
 
 
 def _official_url(value, source):
@@ -178,19 +191,18 @@ class SharedMusicBrowser:
             self.status.set("请输入歌名或链接。" if self.page_source else "请先粘贴音乐链接。")
             self.entry.focus_set()
             return "break"
-        link_source = shared_music.shared_music_source(value)
+        links = links_in_text(value, lambda link: public_music_source(link) in (SOURCES if self.page_source is None
+                                                                                else (self.page_source,)))
+        link_source = public_music_source(links[0]) if len(links) == 1 else None
         if self.catalog is not None and not link_source and "://" not in value and not value.startswith("www."):
             self._search(value)
             return "break"
-        if self.page_source and link_source != self.page_source:
-            self.status.set(f"请粘贴{SOURCES[self.page_source]}的歌曲或歌单链接。")
+        if not link_source:
+            name = SOURCES.get(self.page_source, "音乐平台")
+            self.status.set(f"请一次粘贴一个{name}歌曲或歌单链接。")
             return "break"
-
-        if self.page_source == "qq":
-            session = self.account.session
-            self._read(lambda stop: qq_catalog.resolve_public_qq(value, session=session, stop=stop), "正在读取公开曲目…")
-        else:
-            self._read(lambda _stop: shared_music.resolve_music(value), "正在读取公开曲目…")
+        session = self.account.session if self.catalog is not None else None
+        self._read(lambda stop: resolve_public_music_link(links[0], session=session, stop=stop), "正在读取公开曲目…")
         return "break"
 
     @property
@@ -425,22 +437,9 @@ class SharedMusicBrowser:
         if all_rows and self.view == "search":
             return
         selected = set(self.tree.selection())
-        in_playlist = self.private_view or "/playlist" in urlsplit(self.collection_url).path
-        rows = []
-        for row, item in self.rows.items():
-            if not all_rows and row not in selected:
-                continue
-            url = self._selected_url(row)
-            path = urlsplit(url).path
-            if not (path == "/song" if self.source == "netease" else "/songDetail/" in path):
-                continue
-            task = dict(item, source=self.source, url=url)
-            if in_playlist:
-                group = self.collection_url or self.caption.get()
-                task.update(batch_key=f"{self.source}:{group}", batch_title=self.caption.get(), total=self.total)
-            else:
-                task.pop("position", None)
-            rows.append(task)
+        items = (item for row, item in self.rows.items() if all_rows or row in selected)
+        rows = list(shared_music.queue_rows(self.source, items, collection_url=self.collection_url,
+                                            batch_title=self.caption.get(), total=self.total, private=self.private_view))
         if rows:
             count = self.app.enqueue_tasks(rows, begin)
             if count and not begin:
