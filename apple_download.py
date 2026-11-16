@@ -13,7 +13,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError, TIT2, TPE1
 from mutagen.mp4 import MP4
 
 import audio
-from bili_catalog import clean_song_title, parse_video_link, resolve_video
+from bili_catalog import clean_song_title, parse_video_link, resolve_video, suggest_folder
 from bili_download import download_video
 from bili_resume import forget_resume
 from bili_sidecars import save_danmaku, save_subtitle
@@ -92,6 +92,7 @@ def download_options(preferences):
             "bili_danmaku": preferences.get("bili_danmaku", False),
             "bili_subtitle": preferences.get("bili_subtitle", False),
             "bili_auto_category": preferences.get("bili_auto_category", True),
+            "bili_category_rules": 2,
             "youtube_mode": preferences.get("youtube_mode", "video"),
             "volume": _volume_key(preferences["folder"])}
 
@@ -100,7 +101,19 @@ def task_category(task):
     category = task.options["category"]
     if category or task.source != "bilibili" or not task.options.get("bili_auto_category", True):
         return category
-    label = "音乐" if task.media_category == "music" else task.source_category or "B 站"
+    label = ""
+    if task.options.get("bili_category_rules", 1) == 2:
+        parent = ""
+        try:
+            video_id, _ = parse_video_link(task.url)
+            upload = f"bilibili:{video_id}"
+            if task.batch_key == upload or task.batch_key.startswith(upload + ":repeat:"):
+                parent = task.batch_title
+        except ValueError:
+            pass
+        label = suggest_folder(task.title, task.source_category, task.media_category, parent_title=parent)
+    if not label:
+        label = "音乐" if task.media_category == "music" else task.source_category or "B 站"
     return clean_name(label, 120)
 
 

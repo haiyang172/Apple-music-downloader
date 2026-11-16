@@ -70,6 +70,39 @@ _ARTIST_EXCLUSION = re.compile(r"上线|发布|即将|版本|新版|重制版|�
 _DASH = re.compile(r"\s+-+\s+|\s*[–—]+\s*|\s*-+\s*(?=[\u3400-\u9fff])")
 _MUSIC_CATEGORIES = frozenset(("音乐", "音樂", "原创音乐", "翻唱", "演奏", "音乐现场", "音乐综合", "music"))
 _CLOSE_BRACKET = {"[": "]", "【": "】", "〖": "〗", "(": ")", "（": "）"}
+_FOLDER_NON_MUSIC = re.compile(
+    r"解[说說]|[讲講]解|影[评評]|[实實][况況]|[实實][机機](?:演示|玩法)|攻略|教程|教[学學]|[评評][测測]|"
+    r"通[关關]|全[连連]|手元|[谱譜]面(?:展示|[预預][览覽]|[预預]告|演示)|[预預]告片|配音|"
+    r"(?<![A-Za-z])(?:gameplay|full combo|all perfect|reaction)(?![A-Za-z])",
+    re.I,
+)
+_FOLDER_MUSIC = re.compile(
+    r"歌曲|金曲|[粤粵][语語]歌(?![词詞])|(?:[经經]典|[怀懷][旧舊])老歌|老歌合集|"
+    r"音[乐樂](?:合集|集|欣[赏賞]|分享|全集|[选選]集|全收集)|[纯純]享|演唱(?![会會])|翻唱|演奏|"
+    r"(?<![A-Za-z])(?:MV|music collection|music video)(?![A-Za-z])",
+    re.I,
+)
+_FOLDER_SOUNDTRACK = re.compile(r"原[声聲](?:[带帶]|音[乐樂])?|(?<![A-Za-z])(?:OST|original soundtrack)(?![A-Za-z])", re.I)
+_FOLDER_BGM = re.compile(r"(?<![A-Za-z])BGM(?![A-Za-z])", re.I)
+_FOLDER_PERSONA = re.compile(
+    r"女神[异異][闻聞][录錄]|ペルソナ(?:[1-5]|シリーズ)|"
+    r"(?<![A-Za-z0-9])(?:persona[ -]*(?:[1-5](?:fes|[rgx])?|series)|p5x)(?![A-Za-z0-9])",
+    re.I,
+)
+_FOLDER_RHYTHM = re.compile(
+    r"音游|音[乐樂][游遊][戏戲]|(?<![A-Za-z0-9])(?:phigros|arcaea|maimai|chunithm|muse dash|"
+    r"sound voltex|project sekai|beatmania(?: iidx)?)(?![A-Za-z0-9])",
+    re.I,
+)
+_FOLDER_RHYTHM_AUDIO = re.compile(r"音游(?:曲(?:目)?|原[声聲]|配[乐樂])|音[乐樂][游遊][戏戲](?:原[声聲]|配[乐樂])")
+_FOLDER_GAME_AUDIO = re.compile(r"[游遊][戏戲](?:原[声聲]|配[乐樂]|主[题題]曲)")
+_FOLDER_OTHER_SOUNDTRACK = re.compile(r"(?:电影|電視|电视|影片|动画|動畫|动漫|動漫)(?:版|的)?\s*(?:原[声聲]|配[乐樂]|OST)", re.I)
+_FOLDER_GAME_PARTITIONS = frozenset(("游戏", "遊戲", "单机游戏", "单机游戏区", "网络游戏", "电子竞技", "音游", "音乐游戏"))
+_FOLDER_CANTONESE = re.compile(
+    r"[\[【〖(（]\s*[粤粵][语語]\s*[\]】〗)）]|"
+    r"[粤粵][语語](?:歌(?![词詞])|金曲|[经經]典|老歌|翻唱|原唱|演唱|音[乐樂]|流行|[现現][场場]版|版)"
+)
+_FOLDER_OLDIES = re.compile(r"老歌|[怀懷][旧舊](?:金曲|歌曲)|(?:上世[纪紀]|[5-9]0年代)(?:金曲|歌曲)")
 
 
 class BilibiliCatalogError(RuntimeError):
@@ -297,6 +330,32 @@ def _media_category(source_category, title, audio_title):
         return "music"
     if source_category or _NON_MUSIC.search(title):
         return "video"
+    return ""
+
+
+def suggest_folder(title, source_category, media_category, *, parent_title=""):
+    """Suggest one music folder from a Bilibili title or the title of its upload."""
+    title = _display_title(title)
+    if _FOLDER_NON_MUSIC.search(_BOOK_TITLE.sub("", title)):
+        return ""
+    parent_title = _display_title(parent_title)
+    if parent_title != title and not _FOLDER_NON_MUSIC.search(_BOOK_TITLE.sub("", parent_title)):
+        title = f"{title} {parent_title}".strip()
+
+    partition = _display_title(source_category).casefold()
+    soundtrack = _FOLDER_SOUNDTRACK.search(title)
+    music = media_category == "music" or partition in _MUSIC_CATEGORIES or _FOLDER_MUSIC.search(title)
+    if _FOLDER_PERSONA.search(title) and (music or soundtrack or _FOLDER_BGM.search(title)):
+        return "Persona 系列"
+    if _FOLDER_RHYTHM_AUDIO.search(title) or (_FOLDER_RHYTHM.search(title) and (music or soundtrack)):
+        return "音游"
+    if _FOLDER_GAME_AUDIO.search(title) or (partition in _FOLDER_GAME_PARTITIONS and soundtrack
+                                           and not _FOLDER_OTHER_SOUNDTRACK.search(title)):
+        return "游戏原声"
+    if music and _FOLDER_CANTONESE.search(title):
+        return "粤语"
+    if music and _FOLDER_OLDIES.search(title):
+        return "老歌"
     return ""
 
 

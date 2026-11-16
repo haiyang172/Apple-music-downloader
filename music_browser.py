@@ -25,6 +25,9 @@ FILTERS = {"song": "歌曲", "album": "专辑", "playlist": "歌单"}
 PLACEHOLDER = "搜索歌曲、艺人或专辑"
 PREFETCH_ROWS = 8
 RENDER_BATCH = 100
+_COVER_MAX_BYTES = 768 * 1024
+_COVER_MAX_PIXELS = 1024 * 1024
+_COVER_MAX_SIDE = 384
 
 
 def _duration(value):
@@ -83,24 +86,72 @@ def _apple_data(url, size, timeout=5):
     return data
 
 
+def _png_dimensions(data):
+    if len(data) >= 24 and data[:16] == b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
+        return struct.unpack(">II", data[16:24])
+    return None
+
+
+def _resize_cover(data, pixels, dimensions):
+    if not 0 < len(data) <= _COVER_MAX_BYTES:
+        return b""
+    if dimensions is not None:
+        width, height = dimensions
+        if not (width and height and width * height <= _COVER_MAX_PIXELS):
+            return b""
+        demuxer = "png_pipe"
+    elif data.startswith(b"\xff\xd8\xff"):
+        demuxer = "jpeg_pipe"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        demuxer = "webp_pipe"
+    else:
+        return b""
+
+    root = Path(__file__).resolve().parent
+    ffmpeg = root / "backend" / "tools" / "ffmpeg.exe"
+    if not ffmpeg.is_file():
+        ffmpeg = root.parent / "GUI-downloader" / "tools" / "ffmpeg.exe"
+    if not ffmpeg.is_file():
+        return b""
+    filters = rf"crop=min(iw\,ih):min(iw\,ih):exact=1,scale={pixels}:{pixels}:flags=lanczos,setsar=1"
+    try:
+        result = subprocess.run(
+            [str(ffmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-filter_threads", "1",
+             "-threads", "1", "-max_pixels", str(_COVER_MAX_PIXELS), "-protocol_whitelist", "pipe", "-f", demuxer,
+             "-i", "pipe:0", "-map", "0:v:0", "-frames:v", "1", "-vf", filters, "-pix_fmt", "rgba",
+             "-threads", "1", "-c:v", "png", "-f", "image2pipe", "pipe:1"],
+            input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True, timeout=6,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    if len(result) <= _COVER_MAX_BYTES and _png_dimensions(result) == (pixels, pixels):
+        return result
+    return b""
+
+
 def _thumbnail(url, pixels):
-    if not _apple_art_url(url):
+    if not _apple_art_url(url) or type(pixels) is not int or not 1 <= pixels <= _COVER_MAX_SIDE:
         return b""
     sized = artwork_url_at_size(url, pixels)
     try:
-        data = _apple_data(sized or url, 768 * 1024)
+        data = _apple_data(sized or url, _COVER_MAX_BYTES)
     except (OSError, ValueError):
         if not sized or sized == url:
             return b""
         try:
-            data = _apple_data(url, 768 * 1024)
+            data = _apple_data(url, _COVER_MAX_BYTES)
         except (OSError, ValueError):
             return b""
-    if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return b""
-    if any(not 1 <= dimension <= 384 for dimension in struct.unpack(">II", data[16:24])):
-        return b""
-    return base64.b64encode(data)
+    dimensions = _png_dimensions(data)
+    if dimensions == (pixels, pixels):
+        return base64.b64encode(data)
+    converted = _resize_cover(data, pixels, dimensions)
+    if converted:
+        return base64.b64encode(converted)
+    if dimensions and all(1 <= side <= _COVER_MAX_SIDE for side in dimensions):
+        return base64.b64encode(data)
+    return b""
 
 
 def prepare_preview(url, ffmpeg, directory):

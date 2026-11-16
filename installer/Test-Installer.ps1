@@ -472,8 +472,33 @@ import bili_catalog
 import bili_collections
 import bili_download
 import bili_resume
+import base64
+from dataclasses import replace
 from io import BytesIO
 from unittest.mock import patch
+
+window = tk.Tk()
+window.withdraw()
+try:
+    pixels = 104
+    bands = b"\0\0\xff" * 20 + b"\xff\0\0" * 20 + b"\0\xff\0" * 20 + b"\xff\xff\xff" * 20
+    source = b"P6\n80 40\n255\n" + bands * 40
+    for codec in ("png", "mjpeg"):
+        encoded = subprocess.run(
+            [str(backend / "tools/ffmpeg.exe"), "-v", "error", "-f", "ppm_pipe", "-i", "pipe:0",
+             "-frames:v", "1", "-c:v", codec, "-f", "image2pipe", "pipe:1"],
+            input=source, capture_output=True, check=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+        with patch.object(music_browser, "_apple_data", side_effect=[OSError("Requested rendition unavailable"), encoded]):
+            data = music_browser._thumbnail("https://fixture.mzstatic.com/art/48x48bb.jpg", pixels)
+        assert base64.b64decode(data).startswith(b"\x89PNG\r\n\x1a\n")
+        image = tk.PhotoImage(master=window, data=data)
+        assert (image.width(), image.height()) == (pixels, pixels)
+        left, right = image.get(20, 50), image.get(82, 50)
+        assert left[0] > 200 and left[1] < 50 and right[1] > 200 and right[0] < 50
+finally:
+    window.destroy()
+print("High-DPI artwork fallback crops and scales mismatched PNG and JPEG without copying low-resolution pixels.")
 
 window, app = new_window()
 try:
@@ -622,6 +647,15 @@ try:
     wait_for(window, lambda: not app.busy)
     task = app.queue_store.get(task.id)
     assert task.state == "complete" and Path(task.files[0]).parent == profile / "音乐"
+    persona = replace(task, title="第 2 段", batch_title="Persona 5 OST 原声合集")
+    assert apple_download.task_category(persona) == "Persona 系列"
+    assert apple_download.task_category(replace(persona, batch_key="bilibili:favorite:123")) == "音乐"
+    assert apple_download.task_category(replace(persona, options={**persona.options, "category": "自选歌单"})) == "自选歌单"
+    assert apple_download.task_category(replace(persona, options={**persona.options, "bili_category_rules": 1})) == "音乐"
+    assert bili_catalog.suggest_folder("Phigros 音乐全收集", "游戏", "music") == "音游"
+    assert bili_catalog.suggest_folder("粤语经典老歌合集", "音乐", "music") == "粤语"
+    assert bili_catalog.suggest_folder("经典老歌回顾", "音乐", "music") == "老歌"
+    assert bili_catalog.suggest_folder("Phigros All Perfect 手元", "游戏", "video") == ""
     assert Path(task.files[0]).name == "周杰伦 - 夜曲.m4a"
     tags = mutagen.File(task.files[0]).tags
     assert tags["\xa9nam"] == ["夜曲"] and tags["\xa9ART"] == ["周杰伦"]
