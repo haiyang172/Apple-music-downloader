@@ -1,5 +1,6 @@
 """Read song and playlist metadata published on QQ Music and NetEase pages."""
 
+from hashlib import sha256
 import json
 import re
 from html.parser import HTMLParser
@@ -12,6 +13,9 @@ _QQ_HOSTS = {"y.qq.com", "i.y.qq.com"}
 _NETEASE_HOSTS = {"music.163.com", "y.music.163.com"}
 _NUMERIC_ID = re.compile(r"[1-9][0-9]{0,19}")
 _QQ_SONG_ID = re.compile(r"[A-Za-z0-9]{14}")
+_QQ_ACCOUNT_ID = re.compile(r"[A-Za-z0-9]{1,64}")
+_QQ_PLAYLIST_ID = re.compile(r"(?:[1-9][0-9]{0,19}|liked:201|directory:[1-9][0-9]{0,19})")
+_PRIVATE_COLLECTION_KEY = re.compile(r"(qq|netease):private:[a-f0-9]{64}")
 _QQ_PATH = re.compile(r"/n/(?:ryqq(?:_v2)?|yqq)/(songDetail|song|playlist)/([A-Za-z0-9]+)(?:\.html)?/?")
 _NETEASE_PATH = re.compile(r"/(?:m/)?(song|playlist)(?:/([1-9][0-9]{0,19})(?:/[A-Za-z0-9_-]+)?)?/?")
 _DURATION = re.compile(r"PT(?:(\d{1,3})H)?(?:(\d{1,3})M)?(?:(\d{1,3})(?:\.\d+)?S)?")
@@ -84,13 +88,43 @@ def shared_music_source(value):
     return source
 
 
-def queue_rows(source, rows, *, collection_url="", batch_title="", total=None, private=False):
+def private_collection_key(source, account_id, playlist):
+    """Return a stable queue group for one verified account's personal playlist."""
+    if source == "qq":
+        valid_account = (isinstance(account_id, str) and account_id != "0"
+                         and _QQ_ACCOUNT_ID.fullmatch(account_id))
+        identifier_pattern = _QQ_PLAYLIST_ID
+    elif source == "netease":
+        valid_account = type(account_id) is int and 0 < account_id < 10**19
+        identifier_pattern = _NUMERIC_ID
+    else:
+        valid_account = False
+        identifier_pattern = _NUMERIC_ID
+    if not valid_account or not isinstance(playlist, dict):
+        raise ValueError("请选择当前登录账号的歌单。")
+    owner = playlist.get("_account_id")
+    identifier, kind = playlist.get("id"), playlist.get("kind")
+    if (type(owner) is not type(account_id) or owner != account_id
+            or not isinstance(identifier, str) or not identifier_pattern.fullmatch(identifier)
+            or kind not in ("liked", "created", "collected")):
+        raise ValueError("请选择当前登录账号的歌单。")
+    identity = json.dumps([source, account_id, kind, identifier], separators=(",", ":")).encode("ascii")
+    return f"{source}:private:{sha256(identity).hexdigest()}"
+
+
+def queue_rows(source, rows, *, collection_url="", batch_title="", total=None, private=False, collection_key=""):
     """Turn public or personal track rows into canonical queue items."""
+    if collection_key:
+        match = _PRIVATE_COLLECTION_KEY.fullmatch(collection_key) if isinstance(collection_key, str) else None
+        if match is None or match[1] != source:
+            raise ValueError("歌单队列标识与当前音乐平台不符。")
     try:
         collection = _parse_link(collection_url)
     except ValueError:
         collection = None
-    playlist = private or (collection is not None and collection[0] == source and collection[1] == "playlist")
+    playlist = private or bool(collection_key) or (
+        collection is not None and collection[0] == source and collection[1] == "playlist"
+    )
     group = collection[3] if collection else batch_title
     for row in rows:
         try:
@@ -101,7 +135,7 @@ def queue_rows(source, rows, *, collection_url="", batch_title="", total=None, p
             continue
         item = dict(row, source=source, url=url)
         if playlist:
-            item.update(batch_key=f"{source}:{group}", batch_title=batch_title, total=total)
+            item.update(batch_key=collection_key or f"{source}:{group}", batch_title=batch_title, total=total)
         else:
             item.pop("position", None)
         yield item

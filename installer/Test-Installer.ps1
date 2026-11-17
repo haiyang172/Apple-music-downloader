@@ -1372,6 +1372,93 @@ for source, catalog, session, verified_account, owner, other_owner, song_link in
     assert b"cache-fixture-netease-key" not in cache_path.read_bytes()
 print("Private QQ and NetEase caches appeared before refresh, retained complete lists on partial results, kept selection, and cleared on expiry.")
 
+for source, catalog, session, verified_account, owner, song_url in (
+    ("qq", qq_catalog, QqSession("5678901", "batch-fixture-qq-key", "Batch account"),
+     QqAccount("5678901", "Batch account"), "5678901", "https://y.qq.com/n/ryqq_v2/songDetail/00000000073001"),
+    ("netease", netease_catalog, NeteaseSession(5678901, (("MUSIC_U", "batch-fixture-netease-key"),)),
+     NeteaseAccount(5678901, "Batch account"), 5678901, "https://music.163.com/song?id=73001"),
+):
+    playlists = [
+        {"id": f"directory:{number}" if source == "qq" else str(number),
+         "dir_id": number, "tid": 0, "kind": "created", "title": "同名私密歌单", "total": 2,
+         "url": "", "private": True, "_account_id": owner}
+        for number in (53001, 53002)
+    ]
+    rows = [
+        {"source": source, "id": "00000000073001" if source == "qq" else "73001",
+         "title": "重复曲目", "artist": "Batch Artist", "album": "", "duration": 90,
+         "url": song_url, "position": position}
+        for position in (1, 2)
+    ]
+    library = {"source": source, "rows": playlists, "total": 2, "warnings": []}
+    songs = {"source": source, "rows": rows, "total": 2, "title": "同名私密歌单", "url": "", "warning": ""}
+    cache = SharedMusicCache(settings.DATA / "shared-music.sqlite3")
+    for selected_playlist in playlists:
+        assert cache.replace(source, owner, songs, playlist=selected_playlist)
+    calls = []
+
+    def read_batch(current_session, selected_playlist, *, stop=None):
+        assert current_session == session
+        calls.append(selected_playlist["id"])
+        if selected_playlist["id"] == playlists[1]["id"]:
+            raise RuntimeError("临时网络错误")
+        return songs
+
+    with ExitStack() as context:
+        for provider, auth in (("qq", Studio.QqAuth), ("netease", Studio.NeteaseAuth)):
+            context.enter_context(patch.object(auth, "load", return_value=session if provider == source else None))
+            context.enter_context(patch.object(auth, "check", return_value=verified_account if provider == source else None))
+        context.enter_context(patch.object(catalog, "list_playlists", return_value=library))
+        context.enter_context(patch.object(catalog, "resolve_playlist", side_effect=read_batch))
+        window, app = new_window()
+        try:
+            app.show(source)
+            browser = app.shared_music_browsers[source]
+            wait_for(window, lambda: browser.view == "library" and not browser.private_refreshing and len(browser.rows) == 2)
+            browser.tree.selection_set(browser.tree.get_children())
+            window.update()
+            assert str(browser.queue_button.cget("state")) == "normal"
+            before = {item.id for item in app.queue_store.list_tasks()}
+            browser.queue_button.invoke()
+            wait_for(window, lambda: not browser.batch_busy and len(set(app.tasks) - before) == 4)
+            queued = [item for item in app.queue_store.list_tasks() if item.id not in before]
+            keys = {item.batch_key for item in queued}
+            assert len(keys) == 2 and all(sorted(item.position for item in queued if item.batch_key == key) == [1, 2] for key in keys)
+            assert all(item.total == 2 and "batch-fixture" not in item.batch_key for item in queued)
+            assert calls == [playlist["id"] for playlist in playlists]
+            browser.queue_button.invoke()
+            wait_for(window, lambda: not browser.batch_busy)
+            assert len([item for item in app.queue_store.list_tasks() if item.id not in before]) == 4
+
+            with patch.object(app, "start_download") as begin:
+                browser.download_button.invoke()
+                wait_for(window, lambda: not browser.batch_busy and begin.called)
+                assert len(begin.call_args.args[0]) == 4
+
+            app.show(source)
+            browser.tree.selection_set(browser.tree.get_children()[0])
+            browser._open_selected()
+            wait_for(window, lambda: browser.view == "tracks" and not browser.private_refreshing)
+            browser._enqueue(False, all_rows=True)
+            assert len([item for item in app.queue_store.list_tasks() if item.id not in before]) == 4
+            browser.account.account = None
+            browser._enqueue(False, all_rows=True)
+            assert len([item for item in app.queue_store.list_tasks() if item.id not in before]) == 4
+            browser.library_button.invoke()
+            wait_for(window, lambda: browser.view == "library" and not browser.private_refreshing)
+            browser.tree.selection_set(browser.tree.get_children())
+            window.update()
+            with patch.object(catalog, "resolve_playlist", return_value=songs) as fresh, \
+                 patch.object(app.shared_music_cache, "read", side_effect=AssertionError("Unverified cache read")), \
+                 patch.object(app.shared_music_cache, "replace", side_effect=AssertionError("Unverified cache write")):
+                browser.queue_button.invoke()
+                wait_for(window, lambda: not browser.batch_busy)
+                assert fresh.call_count == 2
+            assert len([item for item in app.queue_store.list_tasks() if item.id not in before]) == 4
+        finally:
+            app.close()
+print("Multi-selected private playlists expanded in order, retained duplicate positions, reused complete caches, and preserved stable task groups.")
+
 window, app = new_window()
 try:
     for source, catalog, template in (

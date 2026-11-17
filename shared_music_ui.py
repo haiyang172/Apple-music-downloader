@@ -78,6 +78,11 @@ class SharedMusicBrowser:
         self.private_playlist = None
         self.private_complete = False
         self.private_position = None
+        self.batch_serial = 0
+        self.batch_stop = threading.Event()
+        self.batch_busy = False
+        self.batch_session = None
+        self.batch_owner = None
         self.library = None
         self.library_position = None
         self.search_query = ""
@@ -241,6 +246,7 @@ class SharedMusicBrowser:
         self._search(self.search_query, self.next_search_offset)
 
     def _account_changed(self, session):
+        self._cancel_batch()
         self._cancel_private()
         self.library = None
         self.library_position = None
@@ -264,7 +270,8 @@ class SharedMusicBrowser:
 
     def _open_playlist(self, row=None):
         if row is None:
-            row = next(iter(self.tree.selection()), "")
+            selected = self.tree.selection()
+            row = selected[0] if len(selected) == 1 else ""
         if self.busy or row not in self.rows or self.account.session is None:
             return
         session, playlist = self.account.session, self.rows[row]
@@ -280,6 +287,12 @@ class SharedMusicBrowser:
             owner = getattr(session, "user_id", None)
             verified = getattr(profile, "uid", None)
         return owner if owner and type(owner) is type(verified) and owner == verified else None
+
+    def _queue_owner(self, session):
+        if self.account.account is not None:
+            return self._private_owner(session)
+        field = "musicid" if self.page_source == "qq" else "user_id"
+        return getattr(session, field, None)
 
     def _cancel_private(self):
         self.private_stop.set()
@@ -428,6 +441,7 @@ class SharedMusicBrowser:
         self.status.set("")
 
     def _read(self, fetch, status, *, append=False):
+        self._cancel_batch()
         self._cancel_private()
         self.serial += 1
         serial = self.serial
@@ -608,29 +622,164 @@ class SharedMusicBrowser:
             self.library_button.configure(text="返回歌单" if can_go_back else "我的歌单")
             if library:
                 self.open_playlist_button.grid()
-                self.open_playlist_button.configure(state="normal" if self.tree.selection() else "disabled")
+                single = len(self.tree.selection()) == 1 and not self._opening
+                self.open_playlist_button.configure(state="normal" if single else "disabled")
             else:
                 self.open_playlist_button.grid_remove()
         if self.page_source in ("qq", "netease"):
-            can_enqueue = self.source == self.page_source and not self._opening and not library
+            can_enqueue = self.source == self.page_source and not self._opening and not self.batch_busy
+            if library:
+                can_enqueue = can_enqueue and self.account.session is not None
             selected = can_enqueue and bool(self.tree.selection())
             self.download_button.configure(state="normal" if selected else "disabled")
             self.queue_button.configure(state="normal" if selected else "disabled")
             self.queue_all_button.configure(state="normal" if self.rows and can_enqueue and self.view != "search" else "disabled")
 
     def _enqueue(self, begin, *, all_rows=False):
-        if self.source != self.page_source or not self.source or self.view == "library" or self._opening or self.app.closing:
+        if self.source != self.page_source or not self.source or self._opening or self.batch_busy or self.app.closing:
             return
         if all_rows and self.view == "search":
             return
         selected = set(self.tree.selection())
-        items = (item for row, item in self.rows.items() if all_rows or row in selected)
+        items = [dict(item) for row, item in self.rows.items() if all_rows or row in selected]
+        if self.view == "library":
+            self._resolve_playlists(items, begin)
+            return
+        collection_key = ""
+        if self.private_view and self.private_playlist is not None:
+            owner = self._queue_owner(self.account.session)
+            try:
+                collection_key = shared_music.private_collection_key(self.source, owner, self.private_playlist)
+            except ValueError as error:
+                self.status.set(str(error))
+                return
         rows = list(shared_music.queue_rows(self.source, items, collection_url=self.collection_url,
-                                            batch_title=self.caption.get(), total=self.total, private=self.private_view))
+                                            batch_title=self.caption.get(), total=self.total, private=self.private_view,
+                                            collection_key=collection_key))
         if rows:
             count = self.app.enqueue_tasks(rows, begin)
             if count and not begin:
                 self.status.set(f"已加入队列 {count} 首")
+
+    def _cancel_batch(self):
+        self.batch_stop.set()
+        self.batch_serial += 1
+        self.batch_busy = False
+        self.batch_session = self.batch_owner = None
+
+    def _resolve_playlists(self, playlists, begin):
+        if not playlists:
+            return
+        session = self.account.session
+        owner = self._queue_owner(session)
+        cache_owner = self._private_owner(session)
+        try:
+            selections = [(playlist, shared_music.private_collection_key(self.page_source, owner, playlist))
+                          for playlist in sorted(playlists, key=lambda item: item["position"])]
+        except (KeyError, ValueError):
+            self.status.set("请先确认当前账号并刷新歌单。")
+            return
+        self._cancel_batch()
+        self.batch_stop = stop = threading.Event()
+        serial = self.batch_serial
+        self.batch_busy = True
+        self.batch_session, self.batch_owner = session, owner
+        self._update_actions()
+        self.status.set("正在读取所选歌单的曲目…")
+        source = self.page_source
+
+        def post(event, value):
+            if not stop.is_set():
+                self.app.post("shared_music_batch", (source, serial, event, value))
+
+        def resolve():
+            queued, warnings = [], []
+            for index, (playlist, key) in enumerate(selections, 1):
+                if stop.is_set():
+                    return
+                post("progress", f"正在读取 {index} / {len(selections)} · {playlist['title']}")
+                try:
+                    result, warning = self._batch_playlist(source, cache_owner, session, playlist, stop)
+                    if stop.is_set():
+                        return
+                    if warning:
+                        warnings.append(f"{playlist['title']} · {warning}")
+                    rows = list(shared_music.queue_rows(source, result["rows"], collection_url=result.get("url", ""),
+                                                        batch_title=result["title"], total=result.get("total"),
+                                                        private=True, collection_key=key))
+                    if len(rows) < len(result["rows"]):
+                        warnings.append(f"{playlist['title']} · 已跳过 {len(result['rows']) - len(rows)} 首无有效链接的曲目")
+                    if not rows:
+                        warnings.append(f"{playlist['title']} · 没有可加入队列的曲目")
+                    queued.extend(rows)
+                except (OSError, RuntimeError, ValueError) as error:
+                    if stop.is_set():
+                        return
+                    if getattr(error, "session_expired", False):
+                        post("expired", str(error))
+                        return
+                    warnings.append(f"{playlist['title']} · {error}")
+                except Exception:
+                    warnings.append(f"{playlist['title']} · 读取失败，请重试")
+            post("done", (queued, warnings, begin))
+
+        threading.Thread(target=resolve, daemon=True).start()
+
+    def _batch_playlist(self, source, owner, session, playlist, stop):
+        cache = self.app.shared_music_cache
+        with self.private_cache_access:
+            cached = None if stop.is_set() or owner is None else cache.read(source, owner, playlist=playlist)
+        try:
+            result = self.catalog.resolve_playlist(session, playlist, stop=stop)
+            result = self._private_result(result, playlist)
+        except (OSError, RuntimeError) as error:
+            if getattr(error, "authorization_denied", False):
+                with self.private_cache_access:
+                    if owner is not None and not stop.is_set() and not getattr(error, "session_expired", False):
+                        cache.discard(source, owner, playlist=playlist)
+                raise
+            code = getattr(error, "code", None)
+            protocol_error = isinstance(error, (qq_catalog.QqCatalogError, netease_catalog.NeteaseCatalogError))
+            transient = not protocol_error or code == 429 or (type(code) is int and 500 <= code < 600)
+            if cached is None or not transient:
+                raise
+            return cached, "连接失败，使用上次完整曲目"
+        if result["warning"]:
+            if cached is not None:
+                return cached, f"使用上次完整曲目 · {result['warning']}"
+            return result, result["warning"]
+        with self.private_cache_access:
+            if owner is not None and not stop.is_set():
+                cache.replace(source, owner, result, playlist=playlist)
+        return result, ""
+
+    def receive_batch(self, serial, event, value):
+        if serial != self.batch_serial or not self.batch_busy or self.app.closing:
+            return
+        if self.account.session is not self.batch_session or self._queue_owner(self.batch_session) != self.batch_owner:
+            self._cancel_batch()
+            self._update_actions()
+            return
+        if event == "progress":
+            self.status.set(value)
+            return
+        self.batch_busy = False
+        self.batch_session = self.batch_owner = None
+        if event == "expired":
+            self.account.expire()
+            self.status.set(value)
+            return
+        self._update_actions()
+        rows, warnings, begin = value
+        count = self.app.enqueue_tasks(rows, begin) if rows else 0
+        notices = [f"已确认 {count} 首在队列中"] if count else []
+        if warnings:
+            notices.append(warnings[0])
+            if len(warnings) > 1:
+                notices.append(f"另有 {len(warnings) - 1} 条提示")
+            for warning in warnings:
+                self.app.log_message(warning)
+        self.status.set(" · ".join(notices) or "没有可加入队列的曲目。")
 
     def _open_selected(self, _event=None):
         if self.view == "library":
@@ -648,6 +797,7 @@ class SharedMusicBrowser:
                 self.open_original(row)
 
     def close(self):
+        self._cancel_batch()
         self.stop.set()
         self._cancel_private()
         if self.catalog is not None:

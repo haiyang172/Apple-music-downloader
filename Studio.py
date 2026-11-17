@@ -1772,6 +1772,10 @@ class Studio:
                 source, *result = value
                 if source in self.shared_music_browsers:
                     self.shared_music_browsers[source].receive_private(*result)
+            elif kind == "shared_music_batch":
+                source, *result = value
+                if source in self.shared_music_browsers:
+                    self.shared_music_browsers[source].receive_batch(*result)
             elif kind == "browser_batch":
                 browser, *result = value
                 browser.receive_batch(*result)
