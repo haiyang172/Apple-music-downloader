@@ -34,6 +34,7 @@ from apple_download import SOURCE, download_options, expand_link, forget_bilibil
 from bili_auth import BiliAuth
 from bili_catalog import is_video_link, resolve_video
 from bili_collections import is_collection_link, resolve_collection
+from bili_favorites_cache import BiliFavoritesCache
 from bili_ui import BiliBrowser
 from download_queue import QueueStore
 from engine import Engine
@@ -132,6 +133,7 @@ class Studio:
         self.music_auth = {"qq": QqAuth(settings.DATA / "qq-music-session.dat"),
                            "netease": NeteaseAuth(settings.DATA / "netease-music-session.dat")}
         self.library_cache = LibraryCache(settings.DATA / "library.sqlite3")
+        self.bili_favorites_cache = BiliFavoritesCache(settings.DATA / "bili-favorites.sqlite3")
         self.shared_music_cache = SharedMusicCache(settings.DATA / "shared-music.sqlite3")
         self.background = BG
         self.queue_store = QueueStore(settings.DATA / "downloads.sqlite3")
@@ -409,7 +411,7 @@ class Studio:
         style = ttk.Style(self.window)
         style.theme_use("clam")
         style.configure(".", font=(self.font, 11), foreground=INK)
-        style.configure("TButton", padding=(13, 7))
+        style.configure("TButton", padding=(13, 7), width=0)
         self.round_style_images = install_round_theme(
             style, self.window, self.scale, bg=BG, panel=PANEL, ink=INK, muted=MUTED, accent=ACCENT,
             border=BORDER, nav=NAV, nav_active=NAV_ACTIVE, nav_account=NAV_ACCOUNT,
@@ -1752,6 +1754,8 @@ class Studio:
                 self.receive_update(*value)
             elif kind == "bili_result":
                 self.bili_browser.receive(*value)
+            elif kind == "bili_favorites":
+                self.bili_browser.receive_favorites(*value)
             elif kind == "youtube_result":
                 self.video_link_pages["youtube"].receive(*value)
             elif kind == "bili_auth":

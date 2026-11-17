@@ -174,7 +174,8 @@ function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
 
 $sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'download_queue.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py', 'library_cache.py',
     'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py',
-    'bili_auth.py', 'qr_account_ui.py', 'bili_catalog.py', 'bili_collections.py', 'bili_download.py', 'bili_resume.py',
+    'bili_auth.py', 'qr_account_ui.py', 'bili_catalog.py', 'bili_collections.py', 'bili_favorites_cache.py',
+    'bili_download.py', 'bili_resume.py',
     'bili_sidecars.py', 'bili_ui.py',
     'qq_auth.py', 'qq_catalog.py', 'qq_download.py', 'qq_sidecars.py', 'share_links.py', 'short_music_links.py',
     'shared_music.py', 'shared_music_cache.py', 'shared_music_ui.py',

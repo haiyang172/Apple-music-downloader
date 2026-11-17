@@ -843,6 +843,13 @@ try:
 
     browser.open_parts()
     wait_for(window, lambda: len(browser.rows) == 2 and not browser.busy)
+    part_row = browser.tree.get_children()[0]
+    browser.tree.selection_set(part_row)
+    position = browser._position()
+    part_url = browser.rows[part_row]["url"]
+    browser._render(browser.result)
+    browser._restore_position(position)
+    assert browser.rows[browser.tree.selection()[0]]["url"] == part_url
     edition_row = browser.tree.get_children()[0]
     browser.tree.selection_set(edition_row)
     source_row = dict(browser.rows[edition_row], audio_title="测试歌手", artist="测试歌曲")
@@ -866,6 +873,81 @@ try:
     assert (edited.audio_title, edited.artist) == ("测试歌曲", "测试歌手")
     persisted, = app.queue_store.add([source_row])
     assert (persisted.id, persisted.audio_title, persisted.artist) == (edited.id, "测试歌曲", "测试歌手")
+
+    uid = account.account.uid
+    folder = {"id": "favorite:4242", "kind": "favorite", "collection_id": 4242, "owner_id": uid,
+              "title": "驾驶音乐", "total": 2, "_account_id": uid,
+              "url": f"https://space.bilibili.com/{uid}/favlist?fid=4242"}
+    followed = {"id": "season:9393", "kind": "season", "collection_id": 9393, "owner_id": 20259914,
+                "title": "已收藏的合集", "total": 8, "_account_id": uid,
+                "url": "https://space.bilibili.com/20259914/lists/9393?type=season"}
+    favorites = {"source": "bilibili", "view": "favorites", "title": "我的收藏夹", "rows": [folder, followed],
+                 "_account_id": uid, "total": 2, "complete": True, "warning": ""}
+    first_video = {"source": "bilibili", "id": "BV1GJ411x7h7", "title": "Persona 5 OST · 《Life Will Change》",
+                   "url": "https://www.bilibili.com/video/BV1GJ411x7h7?p=1", "uploader": "收藏夹投稿者", "artist": "",
+                   "preview_audio_title": "Life Will Change", "preview_artist": "Lyn", "preview_media_category": "music",
+                   "preview_source_category": "音乐", "position": 2, "duration": 35, "total": 2,
+                   "batch_key": "bilibili:favorite:4242", "batch_title": folder["title"]}
+    contents = {"source": "bilibili", "id": "4242", "title": folder["title"], "collection_kind": "favorite", "url": folder["url"],
+                "total": 2, "scanned": 2, "skipped": 1, "complete": True, "_account_id": uid,
+                "folder_id": folder["id"], "rows": [first_video],
+                "warning": "已跳过 1 项不可用或不支持的内容"}
+    cache = app.bili_favorites_cache
+    assert cache.replace(uid, favorites) and cache.replace(uid, contents, folder=folder)
+    assert cache.read(uid + 1) is None
+    index_started, index_release = threading.Event(), threading.Event()
+    folder_started, folder_release = threading.Event(), threading.Event()
+
+    def refresh_index(current_session, current_account, *, stop=None):
+        assert current_session == session and current_account.uid == uid
+        index_started.set()
+        assert index_release.wait(10)
+        return dict(favorites, complete=False, rows=[folder], warning="临时只返回部分收藏夹")
+
+    def refresh_folder(current_session, current_account, selection, *, stop=None):
+        assert current_session == session and current_account.uid == uid and selection["id"] == folder["id"]
+        folder_started.set()
+        assert folder_release.wait(10)
+        return contents
+
+    with patch.object(bili_collections, "list_my_favorites", side_effect=refresh_index), \
+         patch.object(bili_collections, "resolve_my_favorite", side_effect=refresh_folder):
+        try:
+            app.show("bilibili")
+            browser.favorites_button.invoke()
+            wait_for(window, lambda: index_started.is_set() and len(browser.rows) == 2 and not browser.busy)
+            assert browser.favorites_refreshing
+            open_row = next(row for row, item in browser.rows.items() if item["id"] == folder["id"])
+            browser.tree.selection_set(open_row)
+            window.update()
+            assert str(browser.queue_all_button.cget("state")) == "disabled"
+            assert str(browser.download_button.cget("state")) == "disabled"
+            index_release.set()
+            wait_for(window, lambda: not browser.favorites_refreshing)
+            assert browser.rows[browser.tree.selection()[0]]["id"] == folder["id"]
+            assert len(cache.read(uid)["rows"]) == 2
+
+            browser.open_folder()
+            wait_for(window, lambda: folder_started.is_set() and len(browser.rows) == 1 and not browser.busy)
+            assert browser.favorites_refreshing and browser.caption.get() == folder["title"]
+            cached_row, = browser.tree.get_children()
+            assert browser.tree.set(cached_row, "title") == "Life Will Change"
+            browser.queue_all()
+            favorite_task, = [item for item in app.tasks.values() if item.batch_key == "bilibili:favorite:4242"]
+            assert favorite_task.url.endswith("?p=1") and (favorite_task.position, favorite_task.total) == (2, 2)
+            browser.open_parts()
+            folder_release.set()
+            wait_for(window, lambda: browser.caption.get() == "公开演出合集" and len(browser.rows) == 2 and not browser.busy)
+            browser.back()
+            assert browser.caption.get() == folder["title"] and len(browser.rows) == 1
+            browser.back()
+            assert browser.caption.get() == favorites["title"]
+            assert browser.rows[browser.tree.selection()[0]]["id"] == folder["id"]
+            account.logout()
+            assert account.session is None and not browser.rows
+        finally:
+            index_release.set()
+            folder_release.set()
 finally:
     apple_download.download_video = original_bili_download
     apple_download.save_danmaku = original_danmaku
@@ -876,6 +958,7 @@ finally:
     app.bili_auth.clear()
     app.close()
 print("Bilibili QR, encrypted session, song metadata, ASS/SRT/cover/JSON publishing, and collection navigation passed.")
+print("Bilibili personal favorites cache, account scoping, two-level return, and P1 queue passed.")
 
 ffmpeg = backend / "tools/ffmpeg.exe"
 fragment = profile / "fixture-flac.m4s"
