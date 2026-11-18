@@ -107,7 +107,7 @@ def _trusted_cdn(value):
                  or host == "upos-hz-mirrorakam.akamaized.net"))
 
 
-def _select_stream(dash, kind):
+def _select_stream_entry(dash, kind):
     entries = dash.get(kind)
     if not isinstance(entries, list):
         raise RuntimeError(_ACCESS_ERROR)
@@ -121,11 +121,16 @@ def _select_stream(dash, kind):
         if mime != f"{kind}/mp4" or not isinstance(codec, str) or not codec.startswith(prefix + "."):
             continue
         if urls := _stream_urls(entry):
-            supported.append((bitrate if type(bitrate) is int else 0, urls))
+            supported.append((bitrate if type(bitrate) is int else 0, entry, urls))
     if not supported:
         label = "H.264 视频" if kind == "video" else "AAC 音频"
         raise RuntimeError(f"B 站没有提供可下载的 {label}。")
-    return max(supported, key=lambda entry: entry[0])[1]
+    selected = max(supported, key=lambda entry: entry[0])
+    return selected[1], selected[2]
+
+
+def _select_stream(dash, kind):
+    return _select_stream_entry(dash, kind)[1]
 
 
 def _stream_urls(entry):
@@ -135,7 +140,7 @@ def _stream_urls(entry):
     return tuple(dict.fromkeys(url for url in candidates if _trusted_cdn(url)))
 
 
-def _select_flac(dash):
+def _select_flac_entry(dash):
     flac = dash.get("flac")
     entry = flac.get("audio") if isinstance(flac, dict) else None
     if isinstance(entry, dict) and not _restricted(flac) and not _restricted(entry):
@@ -143,8 +148,115 @@ def _select_flac(dash):
         mime = entry.get("mimeType") or entry.get("mime_type")
         if mime == "audio/mp4" and isinstance(codec, str) and codec.casefold() == "flac":
             if urls := _stream_urls(entry):
-                return urls
+                return entry, urls
     raise RuntimeError("B 站没有向当前会话提供原始 FLAC 音轨。可检查网页播放权限，或改选 M4A。")
+
+
+def _select_flac(dash):
+    return _select_flac_entry(dash)[1]
+
+
+def _resolve_selection(url, mode, stop, on_status, session):
+    if mode not in _OUTPUTS:
+        raise ValueError("不支持所选 B 站输出格式。")
+    video_id, page = parse_video_link(url)
+    referer = f"{VIDEO_BASE}{video_id}?p={page or 1}"
+    _check_stop(stop)
+    on_status("正在读取 B 站播放信息…")
+    part = resolve_video(referer, metadata=False, session=session)["rows"][0]
+    dash = _playback(video_id, part, referer, stop, session)
+    audio = _select_flac_entry(dash) if mode == "flac" else _select_stream_entry(dash, "audio")
+    video = _select_stream_entry(dash, "video") if mode == "video" else None
+    return video_id, part, referer, dash, audio, video
+
+
+def _positive_number(value):
+    return value if type(value) in (int, float) and 0 < value < float("inf") else None
+
+
+def _declared_size(entry, limit):
+    # DASH size is optional; an invalid declaration is never a reason to try a
+    # lower quality or a different origin. HEAD may supply the missing length.
+    size = entry.get("size")
+    return size if type(size) is int and 8 <= size <= limit else None
+
+
+def _head_size(url, referer, stop, limit):
+    _check_stop(stop)
+    video_id, page = parse_video_link(referer)
+    if not _trusted_cdn(url) or referer != f"{VIDEO_BASE}{video_id}?p={page or 1}":
+        raise RuntimeError("B 站返回了无法验证的媒体地址。")
+    request = Request(url, method="HEAD", headers={
+        "Referer": referer, "User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity",
+    })
+    try:
+        # A fresh opener carries no account cookies and refuses redirects. The
+        # media response body is deliberately never read, even if HEAD is not
+        # implemented correctly by a server.
+        with build_opener(_NoRedirect()).open(request, timeout=10) as response:
+            size = _content_size(response, limit)
+    except HTTPError as error:
+        if error.code in (405, 501):
+            error.close()
+            _check_stop(stop)
+            return None
+        raise _network_error(error) from None
+    except (OSError, HTTPException) as error:
+        raise _network_error(error) from None
+    _check_stop(stop)
+    return size
+
+
+def probe_video(url, mode, stop, on_status, *, session=None):
+    """Return selected source-track specifications without downloading media.
+
+    Sizes are source transfer bytes; MP4 is the sum of both selected tracks,
+    while MP3 still reports its AAC input. Codecs and bitrate are declarations
+    from the playback API, not measurements of decoded or converted media.
+    No signed URL, account information or resumable state leaves this call.
+    """
+    _, part, referer, dash, audio, video = _resolve_selection(url, mode, stop, on_status, session)
+    _check_stop(stop)
+    on_status("正在读取 B 站媒体规格…")
+    sizes = []
+    warning = None
+    for selected, limit in ((audio, _AUDIO_LIMIT), (video, _VIDEO_LIMIT)):
+        if selected is not None:
+            entry, urls = selected
+            size = _declared_size(entry, limit)
+            if size is None:
+                try:
+                    size = _head_size(urls[0], referer, stop, limit)
+                except Cancelled:
+                    raise
+                except RuntimeError:
+                    # Size is optional metadata. A failed HEAD cannot authorize
+                    # a GET, another tier, or a different media URL; download
+                    # keeps its own full response and permission validation.
+                    size = None
+                if size is None:
+                    warning = "平台未返回可读取的文件大小，下载时仍会校验。"
+            sizes.append(size)
+            _check_stop(stop)
+    codec = "FLAC" if mode == "flac" else "AAC"
+    labels = {"video": "H.264 + AAC", "audio": "AAC 原始音轨",
+              "mp3": "AAC 源音轨（转 MP3）", "flac": "原始 FLAC 音轨"}
+    video_entry = video[0] if video is not None else {}
+    duration = _positive_number(part.get("duration")) or _positive_number(dash.get("duration"))
+    bitrate = audio[0].get("bandwidth")
+    _check_stop(stop)
+    result = {
+        "source": "bilibili", "mode": mode,
+        "label": labels[mode] + ("（待下载校验）" if warning else ""), "codec": codec,
+        "bitrate": bitrate if type(bitrate) is int and bitrate > 0 else None,
+        "size": sum(sizes) if all(size is not None for size in sizes) else None,
+        "duration": duration, "video_codec": "H.264" if video is not None else None,
+        "width": video_entry.get("width") if type(video_entry.get("width")) is int and video_entry["width"] > 0 else None,
+        "height": video_entry.get("height") if type(video_entry.get("height")) is int and video_entry["height"] > 0 else None,
+    }
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 def _content_size(response, limit):
@@ -238,16 +350,9 @@ def _mux(ffmpeg, inputs, mode, output, stop):
 
 def download_video(url, mode, stage, ffmpeg, stop, on_status, *, session=None, checkpoint=None, check_volume=None):
     """Download one available video part and return the prepared media path."""
-    if mode not in _OUTPUTS:
-        raise ValueError("不支持所选 B 站输出格式。")
-    video_id, page = parse_video_link(url)
-    referer = f"{VIDEO_BASE}{video_id}?p={page or 1}"
-    _check_stop(stop)
-    on_status("正在读取 B 站播放信息…")
-    part = resolve_video(referer, metadata=False, session=session)["rows"][0]
-    dash = _playback(video_id, part, referer, stop, session)
-    audio_urls = _select_flac(dash) if mode == "flac" else _select_stream(dash, "audio")
-    video_urls = _select_stream(dash, "video") if mode == "video" else ()
+    video_id, part, referer, _, audio, video = _resolve_selection(url, mode, stop, on_status, session)
+    audio_urls = audio[1]
+    video_urls = video[1] if video is not None else ()
 
     stage = Path(stage)
     output = stage / ("staged-media" + _OUTPUTS[mode])

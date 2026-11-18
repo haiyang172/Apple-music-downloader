@@ -36,6 +36,7 @@ from bili_auth import BiliAuth
 from bili_catalog import is_video_link, resolve_video
 from bili_collections import is_collection_link, resolve_collection
 from bili_favorites_cache import BiliFavoritesCache
+from bili_preflight_ui import BiliPreflight
 from bili_ui import BiliBrowser
 from download_queue import QueueCancelled, QueueStore
 from engine import Engine
@@ -174,6 +175,7 @@ class Studio:
         self.auth_busy = False
         self.web_login_busy = False
         self.music_preflight_dialog = None
+        self.bili_preflight_dialog = None
         self.web_profile_clearing = False
         self.web_profile_stop = threading.Event()
         self.connect_after_web_clear = False
@@ -997,6 +999,11 @@ class Studio:
                     lines.append(" · ".join(part for part in (quality, output) if part))
             elif task.source == "bilibili":
                 lines.append(BILI_FORMATS.get(task.options.get("bili_mode"), BILI_FORMATS["video"]))
+                converted = task.options.get("bili_output", "original")
+                if task.options.get("bili_mode") != "video" and converted != "original":
+                    lines.append("保存格式 · " + audio.OUTPUTS.get(converted, converted))
+                    if converted == "mp3":
+                        lines.append(f"MP3 输出 · {task.options.get('mp3_bitrate', audio.DEFAULT_MP3_BITRATE)} kbps")
                 if task.audio_title:
                     title = f"{task.artist} - {task.audio_title}" if task.artist else task.audio_title
                     label = "手动歌名" if task.song_edited else "识别歌名"
@@ -1429,7 +1436,18 @@ class Studio:
             return
         if self.music_preflight_dialog is not None:
             self.music_preflight_dialog.close()
+        if self.bili_preflight_dialog is not None:
+            self.bili_preflight_dialog.close()
         self.music_preflight_dialog = MusicPreflight(self, owner, row, MUSIC_SOURCE_QUALITIES[owner.page_source])
+
+    def show_bili_preflight(self, owner, row):
+        if self.closing:
+            return
+        if self.music_preflight_dialog is not None:
+            self.music_preflight_dialog.close()
+        if self.bili_preflight_dialog is not None:
+            self.bili_preflight_dialog.close()
+        self.bili_preflight_dialog = BiliPreflight(self, owner, row, BILI_FORMATS)
 
     def open_platform_account(self):
         source = self.profile_source
@@ -2032,6 +2050,8 @@ class Studio:
         self.closing = True
         if self.music_preflight_dialog is not None:
             self.music_preflight_dialog.close()
+        if self.bili_preflight_dialog is not None:
+            self.bili_preflight_dialog.close()
         self.queue_add_stop.set()
         if self.queue_add_render_timer is not None:
             self.window.after_cancel(self.queue_add_render_timer)

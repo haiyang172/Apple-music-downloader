@@ -11,6 +11,7 @@ from tkinter import ttk
 
 import audio
 from apple_download import download_options
+from preview_layout import PreviewLayout
 from storage import clean_name
 
 
@@ -32,13 +33,9 @@ class MusicPreflight:
         self.info = None
         self.poll_timer = self.start_timer = None
         self.path_state = None
-        window = self.window = tk.Toplevel(app.window, background=app.background)
-        window.withdraw()
-        window.title("下载预览")
-        window.transient(app.window)
-        window.resizable(True, False)
-        window.protocol("WM_DELETE_WINDOW", self.close)
-        window.bind("<Escape>", self.close)
+        self.layout = PreviewLayout(app, "下载预览", self.close)
+        window = self.window = self.layout.window
+        self.canvas = self.layout.canvas
         self.quality = tk.StringVar(window, app.source_quality_labels[self.source].get())
         self.output = tk.StringVar(window, app.output_label.get())
         self.bitrate = tk.StringVar(window, app.fields["mp3_bitrate"].get())
@@ -47,22 +44,7 @@ class MusicPreflight:
         self.size_info = tk.StringVar(window, "—")
         self.output_size = tk.StringVar(window, "—")
         self.target = tk.StringVar(window)
-        actions = app.panel(window, padding=(20, 12))
-        actions.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
-        body = tk.Frame(window, background=app.background)
-        body.pack(side="top", fill="both", expand=True, padx=12, pady=(12, 8))
-        body.rowconfigure(0, weight=1)
-        body.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(body, background=app.background, borderwidth=0, highlightthickness=0,
-                                yscrollincrement=max(12, round(16 * app.scale)))
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(body, command=self.canvas.yview, style="Music.Vertical.TScrollbar")
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.canvas.configure(yscrollcommand=scroll.set)
-        card = app.panel(self.canvas, padding=(20, 17))
-        self.body_item = self.canvas.create_window(0, 0, window=card, anchor="nw")
-        self.canvas.bind("<Configure>", self.fit_body)
-        card.bind("<Configure>", lambda _event: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        card, actions = self.layout.card, self.layout.actions
         card.columnconfigure(1, weight=1)
         app.label(card, self.row.get("title", "歌曲"), large=True, wrap=470).grid(
             row=0, column=0, columnspan=3, sticky="ew")
@@ -104,32 +86,9 @@ class MusicPreflight:
         self.download_button.grid(row=0, column=2, padx=(8, 0))
         self.update_output()
         self.set_ready(False)
-        window.update_idletasks()
-        self.canvas.configure(height=min(card.winfo_reqheight(), round(430 * app.scale)))
-        self.bind_scroll(card)
-        window.update_idletasks()
-        width = min(round(550 * app.scale), app.window.winfo_screenwidth() - 60)
-        height = min(window.winfo_reqheight(), app.window.winfo_screenheight() - 80)
-        window.minsize(min(round(500 * app.scale), width), min(round(250 * app.scale), height))
-        window.geometry(f"{width}x{height}")
-        window.deiconify()
+        self.layout.show()
         self.poll_timer = window.after(80, self.poll)
         self.start_timer = window.after(100, self.inspect)
-
-    def fit_body(self, event):
-        self.canvas.itemconfigure(self.body_item, width=event.width)
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def bind_scroll(self, widget):
-        widget.bind("<MouseWheel>", self.scroll, add="+")
-        for child in widget.winfo_children():
-            self.bind_scroll(child)
-
-    def scroll(self, event):
-        if event.delta:
-            units = max(1, abs(event.delta) // 120)
-            self.canvas.yview_scroll(-units if event.delta > 0 else units, "units")
-        return "break"
 
     def valid(self):
         return not self.closed and not self.app.closing and self.owner.account.session == self.session

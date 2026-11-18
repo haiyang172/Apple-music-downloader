@@ -1255,6 +1255,109 @@ bili_resume.forget_resume(checkpoint)
 assert not checkpoint.exists()
 print("Bilibili persistent range resume, checksummed media, and checkpoint cleanup passed.")
 
+window, app = new_window()
+try:
+    from bili_preflight_ui import SOURCES as BILI_PREVIEW_SOURCES
+    app.fields["folder"].set(str(profile))
+    app.fields["category"].set("")
+    app.bili_format.set(Studio.BILI_FORMATS["audio"])
+    app.output_label.set(Studio.audio.OUTPUTS["original"])
+    app.fields["bili_auto_category"].set(True)
+    browser = app.bili_browser
+    preview_row = {"source": "bilibili", "url": "https://www.bilibili.com/video/BV17x411w7KC?p=2",
+                   "title": "周杰伦《夜曲》纯享", "audio_title": "夜曲", "artist": "周杰伦",
+                   "position": 2, "total": 2, "duration": 1, "source_category": "音乐", "media_category": "music",
+                   "batch_key": "bilibili:BV17x411w7KC", "batch_title": "Persona 5 OST"}
+    row_id = browser.tree.insert("", "end", values=(2, "夜曲", "周杰伦", "Persona 系列", "0:01"))
+    browser.rows[row_id] = preview_row
+    browser.result = {"title": "预览测试", "rows": [preview_row]}
+    browser.tree.selection_set(row_id)
+    browser._selection_changed()
+    entered, release = threading.Event(), threading.Event()
+
+    def bili_probe(url, mode, stop, on_status, *, session=None):
+        assert url == preview_row["url"]
+        if mode == "audio":
+            entered.set()
+            assert release.wait(5)
+        return {"source": "bilibili", "mode": mode, "label": "平台音轨（待下载校验）", "codec": "FLAC" if mode == "flac" else "AAC",
+                "bitrate": 200000, "size": None, "duration": 1, "video_codec": None, "width": None, "height": None,
+                "warning": "平台未返回可读取的文件大小，下载时仍会校验。"}
+
+    with patch.object(bili_download, "probe_video", side_effect=bili_probe):
+        browser.preview_button.invoke()
+        wait_for(window, entered.is_set)
+        preview = app.bili_preflight_dialog
+        preview.mode_box.set(BILI_PREVIEW_SOURCES["flac"])
+        preview.changed()
+        wait_for(window, lambda: preview.info is not None and preview.info["mode"] == "flac")
+        release.set()
+        assert "Persona" in preview.target.get() and str(preview.download_button.cget("state")) == "normal"
+        preview.output_box.set(Studio.audio.OUTPUTS["mp3"])
+        preview.bitrate_box.set("192")
+        preview.song.set("测试歌曲")
+        preview.artist.set("测试歌手")
+        preview.category.set("音游")
+        for value in preview.attachments.values():
+            value.set(False)
+        preview.update_target()
+        assert preview.target.get().endswith(str(Path("音游") / "测试歌手 - 测试歌曲.mp3"))
+        preview.queue_button.invoke()
+        assert preview.closed and preview.stop.is_set() and app.bili_preflight_dialog is None
+        converted, = [task for task in app.tasks.values() if task.batch_key == preview_row["batch_key"]]
+        assert (converted.position, converted.total, converted.audio_title, converted.artist, converted.song_edited) == (
+            2, 2, "测试歌曲", "测试歌手", True)
+        assert converted.options["bili_mode"] == "flac" and converted.options["bili_output"] == "mp3"
+        assert converted.options["mp3_bitrate"] == 192 and converted.options["category"] == "音游"
+        assert app.preferences["bili_output"] == "original"
+
+    def native_bili_source(url, mode, stage, ffmpeg, stop, on_status, *, session, checkpoint, check_volume):
+        assert url == preview_row["url"] and mode == "flac"
+        return Path(shutil.copyfile(profile / "local-test.flac", stage / "source.flac"))
+
+    with patch.object(apple_download, "download_video", side_effect=native_bili_source):
+        app.start_download([converted.id])
+        wait_for(window, lambda: not app.busy)
+    converted = app.queue_store.get(converted.id)
+    assert converted.state == "complete", converted.error
+    output, = map(Path, converted.files)
+    assert output == profile / "音游" / "测试歌手 - 测试歌曲.mp3"
+    track = mutagen.File(output)
+    assert abs(track.info.bitrate - 192000) < 4000
+    assert track.tags["TIT2"].text == ["测试歌曲"] and track.tags["TPE1"].text == ["测试歌手"]
+    info, = converted.audio_details
+    assert info["source"]["codec"] == "FLAC" and info["output"]["codec"] == "MP3"
+
+    with patch.object(bili_download, "probe_video", side_effect=bili_probe):
+        browser.preview_button.invoke()
+        wait_for(window, lambda: app.bili_preflight_dialog is not None and app.bili_preflight_dialog.info is not None)
+        preview = app.bili_preflight_dialog
+        preview.category.set("")
+        preview.song.set("测试歌曲")
+        preview.artist.set("测试歌手")
+        preview.bitrate_box.set("256")
+        preview.output_box.set(Studio.audio.OUTPUTS["mp3"])
+        for value in preview.attachments.values():
+            value.set(False)
+        preview.queue_button.invoke()
+    variants = [task for task in app.tasks.values() if task.batch_key.startswith(preview_row["batch_key"] + ":format:")]
+    assert len(variants) == 1 and variants[0].options["mp3_bitrate"] == 256
+    assert apple_download.task_category(variants[0]) == "Persona 系列"
+    assert app.queue_store.get(converted.id).files == converted.files and output.is_file()
+    with patch.object(bili_download, "probe_video", side_effect=bili_probe):
+        browser.preview_button.invoke()
+        wait_for(window, lambda: app.bili_preflight_dialog is not None and app.bili_preflight_dialog.info is not None)
+        preview = app.bili_preflight_dialog
+        previous_session = browser.account.session
+        browser.account.session = object()
+        wait_for(window, lambda: preview.closed)
+        assert preview.stop.is_set()
+        browser.account.session = previous_session
+finally:
+    release.set()
+    app.close()
+print("Bilibili preview retained declared specs with unknown size, matched classification, saved edited names and converted native FLAC once to tagged MP3.")
+
 import shared_music
 import shared_music_ui
 import video_links_ui

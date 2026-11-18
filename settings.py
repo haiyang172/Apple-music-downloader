@@ -22,6 +22,7 @@ DEFAULTS = {
     "qq_quality": "auto",
     "netease_quality": "auto",
     "bili_mode": "video",
+    "bili_output": "original",
     "youtube_mode": "video",
     "bili_danmaku": False,
     "bili_subtitle": False,

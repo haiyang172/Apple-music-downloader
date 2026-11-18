@@ -94,6 +94,7 @@ def download_options(preferences):
     destination_for(preferences["folder"], preferences["category"])
     return {**{key: preferences[key] for key in OPTION_FIELDS},
             "bili_mode": preferences.get("bili_mode", "video"),
+            "bili_output": preferences.get("bili_output", "original"),
             "bili_danmaku": preferences.get("bili_danmaku", False),
             "bili_subtitle": preferences.get("bili_subtitle", False),
             "bili_archive": preferences.get("bili_archive", False),
@@ -121,7 +122,7 @@ def task_category(task):
         try:
             video_id, _ = parse_video_link(task.url)
             upload = f"bilibili:{video_id}"
-            if task.batch_key == upload or task.batch_key.startswith(upload + ":repeat:"):
+            if task.batch_key == upload or task.batch_key.startswith((upload + ":repeat:", upload + ":format:")):
                 parent = task.batch_title
         except ValueError:
             pass
@@ -310,6 +311,12 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
     saved = existing = 0
     attachment_errors = []
     mode = task.options.get("bili_mode", "video")
+    output_format = task.options.get("bili_output", "original") if mode != "video" else "original"
+    if not isinstance(output_format, str) or output_format not in audio.OUTPUTS:
+        raise ValueError("无法识别所选 B 站音频输出格式。")
+    # Existing jobs keep the original downloader's MP3 VBR conversion. A selected
+    # output starts with AAC instead, so this pipeline encodes it exactly once.
+    source_mode = "audio" if mode == "mp3" and output_format != "original" else mode
     song = ""
     if mode in ("audio", "mp3", "flac"):
         song = clean_song_title(task.title) if task.audio_title is None else task.audio_title
@@ -326,10 +333,18 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
     checkpoint, check_volume = _bili_checkpoint(store, task, disk, create=True)
     with tempfile.TemporaryDirectory(prefix="work-", dir=checkpoint) as working:
         stage = Path(working)
-        source = download_video(task.url, mode, stage, engine.ffmpeg, stop, status, session=session,
+        source = download_video(task.url, source_mode, stage, engine.ffmpeg, stop, status, session=session,
                                 checkpoint=checkpoint, check_volume=check_volume)
         if stop.is_set():
             raise Cancelled()
+        original = None
+        if output_format != "original":
+            original = audio.audio_details(source)
+            status(f"正在生成 {audio.OUTPUTS[output_format]} 音频…")
+            source = prepare_web_audio(source, stage, engine.ffmpeg, output_format,
+                                       task.options.get("mp3_bitrate", audio.DEFAULT_MP3_BITRATE), stop)
+            if stop.is_set():
+                raise Cancelled()
         video_id, page = parse_video_link(task.url)
         multipart = task.total and task.total > 1 and task.batch_key.startswith(f"bilibili:{video_id}")
         name = f"{task.title} [P{page}]" if multipart and page is not None else task.title
@@ -337,11 +352,15 @@ def _download_bilibili(store, task, target, disk, engine, stop, post, session):
             artist = task.artist
             name = f"{artist} - {song}" if artist else song
             try:
-                _write_bili_tags(source, song, artist)
+                if output_format == "original":
+                    _write_bili_tags(source, song, artist)
+                else:
+                    write_music_tags(source, song, artist)
             except (MutagenError, OSError, ValueError):
                 post("log", f"{song} · 无法写入音频标签，仍会按识别出的歌名保存。")
         published = save(source, name)
-        details = _audio_result(source, published.name, preserved=mode != "mp3")
+        details = _audio_result(source, published.name, original,
+                                preserved=output_format == "original" and mode != "mp3")
         for option, label, fetch, kwargs in (
             ("bili_danmaku", "弹幕", save_danmaku, {}),
             ("bili_subtitle", "人工字幕", save_subtitle, {"session": session}),

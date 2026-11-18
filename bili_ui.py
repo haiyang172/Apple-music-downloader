@@ -77,7 +77,7 @@ class BiliBrowser:
             row=0, column=0, sticky="ew", padx=(3, 8)
         )
         details = ttk.Frame(toolbar, style="MusicToolbar.TFrame")
-        details.grid(row=1, column=0, columnspan=4, sticky="ew", padx=(3, 0), pady=(3, 0))
+        details.grid(row=1, column=0, columnspan=5, sticky="ew", padx=(3, 0), pady=(3, 0))
         self.back_button = app.action(details, "返回列表", self.back)
         self.parts_button = app.action(details, "查看分 P", self.open_parts)
         self.folder_button = app.action(details, "打开收藏夹", self.open_folder)
@@ -90,6 +90,8 @@ class BiliBrowser:
         self.queue_button.grid(row=0, column=2)
         self.download_button = app.action(toolbar, "下载所选", self.download_selected, primary=True)
         self.download_button.grid(row=0, column=3, padx=(6, 0))
+        self.preview_button = app.action(toolbar, "下载预览", self.preview_download)
+        self.preview_button.grid(row=0, column=4, padx=(6, 0))
 
         headings = {"position": "分 P", "title": "标题", "artist": "歌手", "category": "分类", "duration": "时长"}
         self.tree = ttk.Treeview(card, columns=tuple(headings), show="headings",
@@ -675,7 +677,7 @@ class BiliBrowser:
         selection = tuple(row for row in self.tree.selection() if row in self.rows)
         selected = len(selection)
         index = self._is_favorites_index()
-        for button in (self.queue_all_button, self.queue_button, self.download_button):
+        for button in (self.queue_all_button, self.queue_button, self.download_button, self.preview_button):
             if index:
                 button.grid_remove()
             else:
@@ -689,6 +691,7 @@ class BiliBrowser:
         self.count.set(hint)
         self.queue_button.configure(state="normal" if selected and not index else "disabled")
         self.download_button.configure(state="normal" if selected and not index else "disabled")
+        self.preview_button.configure(state="normal" if selected == 1 and not index and not self.busy else "disabled")
         self.queue_all_button.configure(state="normal" if self.rows and not index else "disabled")
         if index:
             self.folder_button.pack(side="right")
@@ -720,6 +723,13 @@ class BiliBrowser:
 
     def queue_selected(self):
         self._queue(self.tree.selection())
+
+    def preview_download(self):
+        if self.busy or self.app.closing or self._is_favorites_index():
+            return
+        row = self._selected_row(None)
+        if row is not None:
+            self.app.show_bili_preflight(self, self.rows[row])
 
     def download_selected(self):
         self._queue(self.tree.selection(), begin=True)
