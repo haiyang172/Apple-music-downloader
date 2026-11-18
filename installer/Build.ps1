@@ -130,6 +130,54 @@ function Install-QrEncoder([string]$Python, [string]$Library) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not stage the pinned QR encoder.' }
 }
 
+function Install-AppleWebLogin([string]$Destination) {
+    [void][IO.Directory]::CreateDirectory($Destination)
+    $sdkName = 'microsoft.web.webview2.1.0.4314.35.nupkg'
+    $sdkUrl = 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4314.35/microsoft.web.webview2.1.0.4314.35.nupkg'
+    $sdkHash = '90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4'
+    Copy-PinnedWebFile $sdkName $sdkUrl 9818548 $sdkHash (Join-Path $Destination 'sdk.nupkg')
+    $sdk = Join-Path $buildTools $sdkName
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($sdk)
+    try {
+        $entries = @{
+            'lib/net462/Microsoft.Web.WebView2.Core.dll' = 'Microsoft.Web.WebView2.Core.dll'
+            'lib/net462/Microsoft.Web.WebView2.WinForms.dll' = 'Microsoft.Web.WebView2.WinForms.dll'
+            'runtimes/win-x64/native/WebView2Loader.dll' = 'WebView2Loader.dll'
+            'LICENSE.txt' = 'WebView2-LICENSE.txt'
+            'NOTICE.txt' = 'WebView2-NOTICE.txt'
+        }
+        foreach ($name in $entries.Keys) {
+            $entry = $archive.GetEntry($name)
+            if ($null -eq $entry) { throw "Missing WebView2 package entry: $name" }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $Destination $entries[$name]), $true)
+        }
+    } finally {
+        $archive.Dispose()
+        Remove-Item -LiteralPath (Join-Path $Destination 'sdk.nupkg')
+    }
+    $runtimeUrl = 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/52cfd0a8-f256-48d4-9b18-467f2b3cda78/MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+    $runtimeHash = 'd3cbe8fedb104282d745fff106993efead51ae94f5595a4e75804446a974f9c3'
+    $runtimeFile = Join-Path $Destination 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+    Copy-PinnedWebFile 'webview2-runtime-x64-d3cbe8fe.exe' $runtimeUrl 215116512 $runtimeHash $runtimeFile
+    $signature = Get-AuthenticodeSignature -LiteralPath $runtimeFile
+    $nameType = [Security.Cryptography.X509Certificates.X509NameType]::SimpleName
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo($nameType, $false) -ne 'Microsoft Corporation') {
+        throw 'The WebView2 runtime installer does not have a valid Microsoft signature.'
+    }
+    $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    $compile = @('/nologo', '/codepage:65001', '/target:winexe', '/platform:x64', '/optimize+',
+        '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll',
+        "/reference:$(Join-Path $Destination 'Microsoft.Web.WebView2.Core.dll')",
+        "/reference:$(Join-Path $Destination 'Microsoft.Web.WebView2.WinForms.dll')",
+        "/win32manifest:$(Join-Path $PSScriptRoot 'Launcher.manifest')",
+        "/out:$(Join-Path $Destination 'AppleMusicLogin.exe')", (Join-Path $PSScriptRoot 'AppleMusicLogin.cs'))
+    $icon = Join-Path (Split-Path -Parent $Destination) 'assets\AMDLStudio.ico'
+    if (Test-Path -LiteralPath $icon -PathType Leaf) { $compile += "/win32icon:$icon" }
+    & $compiler @compile
+    if ($LASTEXITCODE -ne 0) { throw 'The Apple Music web login helper could not be compiled.' }
+}
+
 function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
     $json = & $Python -I -B -c 'import json, runpy, sys; m = runpy.run_path(sys.argv[1]); print(json.dumps({k: m[k] for k in ("VERSION", "ASSET", "ASSET_URL", "ASSET_SIZE", "ASSET_SHA256")}))' $LoginSource
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned Wrapper Lite release.' }
@@ -172,7 +220,7 @@ function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
     }
 }
 
-$sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'download_queue.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py', 'library_cache.py',
+$sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'apple_web_login.py', 'download_queue.py', 'engine.py', 'audio.py', 'settings.py', 'storage.py', 'login_service.py', 'library_cache.py',
     'music_catalog.py', 'music_library.py', 'music_browser.py', 'account_ui.py', 'round_theme.py',
     'bili_auth.py', 'qr_account_ui.py', 'bili_catalog.py', 'bili_collections.py', 'bili_favorites_cache.py',
     'bili_download.py', 'bili_resume.py',
@@ -243,6 +291,7 @@ try {
         }
     }
     Install-QrEncoder $python $lib
+    Install-AppleWebLogin (Join-Path $stage 'apple-web-login')
     & $python -I -B -c 'import sqlite3, ssl, sys, tkinter; sys.path.insert(0, sys.argv[1]); import Studio; Studio.configure_windows(); sqlite3.connect(sys.argv[2]).close(); ssl.create_default_context(); tkinter.Tcl()' $stage ':memory:'
     if ($LASTEXITCODE -ne 0) { throw 'The packaged application could not initialize SQLite, TLS, or Tcl/Tk.' }
 

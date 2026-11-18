@@ -31,6 +31,7 @@ DEFAULTS = {
     "wrapper": "",
     "auto_service": True,
     "native_account": False,
+    "apple_web_clear_pending": False,
 }
 
 

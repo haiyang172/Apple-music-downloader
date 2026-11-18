@@ -28,6 +28,7 @@ for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib")
         sys.path.insert(0, str(library))
 
 import app_update
+import apple_web_login
 import audio
 from account_ui import VerificationDialog, build_account_page, show_library_connection
 from apple_download import SOURCE, download_options, expand_link, forget_bilibili_cache, read_links, run_tasks, task_category
@@ -151,6 +152,10 @@ class Studio:
         self.closing = False
         self.service_busy = False
         self.auth_busy = False
+        self.web_login_busy = False
+        self.web_profile_clearing = False
+        self.web_profile_stop = threading.Event()
+        self.connect_after_web_clear = False
         self.pending_region = None
         self.verification = None
         self.update_in_progress = False
@@ -263,6 +268,8 @@ class Studio:
             self.fields["native_account"].get() or self.fields["quality"].get() in ("ALAC", "ATMOS")
         ):
             self.start_timer = window.after(250, self.start_service)
+        if self.preferences.get("apple_web_clear_pending"):
+            self.clear_web_profile()
 
     def make_sidebar(self):
         self.rail = ttk.Frame(self.window, style="Rail.TFrame")
@@ -1257,7 +1264,47 @@ class Studio:
         return settings.session(self.preferences)
 
     def connect_library(self):
+        if self.preferences.get("apple_web_clear_pending"):
+            self.connect_after_web_clear = True
+            self.clear_web_profile()
+            return
+        if self.web_login_busy:
+            self.status.set("正在关闭上一授权窗口，请稍后重试。")
+            return
         show_library_connection(self)
+
+    def clear_web_profile(self):
+        if self.closing or self.web_profile_clearing or self.web_login_busy:
+            return
+        self.web_profile_clearing = True
+        self.auth_status.set("正在清除 Apple Music 网页登录…")
+        self.refresh_account()
+
+        def clear():
+            try:
+                apple_web_login.clear_profile(ROOT, settings.DATA / "apple-web-profile", self.web_profile_stop)
+            except (OSError, RuntimeError, ValueError):
+                error = "网页登录尚未清除，请点退出登录重试。"
+            else:
+                error = ""
+            self.post("web_profile_cleared", error)
+
+        threading.Thread(target=clear, daemon=True).start()
+
+    def finish_web_profile_clear(self, error):
+        self.web_profile_clearing = False
+        if self.closing:
+            return
+        if not error:
+            try:
+                self.store({**self.preferences, "apple_web_clear_pending": False})
+            except (OSError, RuntimeError, ValueError):
+                error = "无法保存网页退出状态，请点退出登录重试。"
+        self.auth_status.set(error or "已退出 Apple Music 登录。")
+        self.refresh_account()
+        if not error and self.connect_after_web_clear:
+            self.connect_after_web_clear = False
+            self.connect_library()
 
     def update_path(self, *_):
         base = self.fields["folder"].get().strip()
@@ -1289,7 +1336,9 @@ class Studio:
         self.apple_profile_text.set("处理中" if self.auth_busy else caption)
         self.profile_connected = signed_in or bool(legacy)
         self.update_profile_style()
-        self.logout_button.configure(state="normal" if not self.auth_busy and (remembered or legacy) else "disabled")
+        can_logout = not self.auth_busy and not self.web_profile_clearing and (
+            remembered or legacy or self.preferences.get("apple_web_clear_pending"))
+        self.logout_button.configure(state="normal" if can_logout else "disabled")
 
     def toggle_legacy(self):
         if self.legacy_card.winfo_manager():
@@ -1338,6 +1387,7 @@ class Studio:
         self.fields["output"].set(values["output"])
         self.fields["region"].set(values["region"])
         self.fields["native_account"].set(values["native_account"])
+        self.fields["apple_web_clear_pending"].set(values.get("apple_web_clear_pending", False))
         self.refresh_account()
         if previous_session != values.get("session"):
             self.library_browser.invalidate()
@@ -1479,6 +1529,8 @@ class Studio:
             self.refresh_account()
             if values.get("session"):
                 self.library_browser.refresh()
+            else:
+                self.connect_library()
             self.auth_status.set("登录成功。此会话将在下次启动时恢复。")
         except (OSError, ValueError) as error:
             self.auth_status.set(str(error))
@@ -1524,9 +1576,14 @@ class Studio:
 
     def clear_account(self):
         try:
+            dialog = getattr(self, "library_connection_dialog", None)
+            if dialog is not None:
+                dialog._dismiss()
             values = dict(self.preferences)
             values.pop("session", None)
             values["native_account"] = False
+            values["apple_web_clear_pending"] = bool(
+                values.get("apple_web_clear_pending") or (settings.DATA / "apple-web-profile").exists())
             self.fields["native_account"].set(False)
             self.native_status = None
             self.store(values)
@@ -1534,6 +1591,9 @@ class Studio:
             self.reset_login()
             self.password.set("")
             self.auth_status.set("已退出登录。")
+            self.connect_after_web_clear = False
+            if values["apple_web_clear_pending"]:
+                self.clear_web_profile()
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法清除会话", error)
 
@@ -1681,6 +1741,10 @@ class Studio:
 
     def close(self):
         self.closing = True
+        self.web_profile_stop.set()
+        dialog = getattr(self, "library_connection_dialog", None)
+        if dialog is not None:
+            dialog._dismiss()
         self.links_stop.set()
         self.bili_browser.stop.set()
         for page in self.video_link_pages.values():
@@ -1699,7 +1763,8 @@ class Studio:
         self.finish_close()
 
     def finish_close(self):
-        if not self.closing or self.busy or self.service_busy or self.auth_busy:
+        if (not self.closing or self.busy or self.service_busy or self.auth_busy
+                or self.web_login_busy or self.web_profile_clearing):
             return False
         try:
             if self.engine is not None:
@@ -1752,6 +1817,16 @@ class Studio:
                 self.finish_links(*value)
             elif kind == "update_result":
                 self.receive_update(*value)
+            elif kind == "web_login_done":
+                self.web_login_busy = False
+                if self.finish_close():
+                    return
+                if self.preferences.get("apple_web_clear_pending"):
+                    self.clear_web_profile()
+            elif kind == "web_profile_cleared":
+                self.finish_web_profile_clear(value)
+                if self.finish_close():
+                    return
             elif kind == "bili_result":
                 self.bili_browser.receive(*value)
             elif kind == "bili_favorites":

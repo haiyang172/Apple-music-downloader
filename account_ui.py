@@ -1,6 +1,7 @@
 """Apple Music download login and library connection dialogs."""
 
 from queue import Empty, SimpleQueue
+from pathlib import Path
 import re
 import threading
 import tkinter as tk
@@ -8,6 +9,7 @@ from tkinter import ttk
 import webbrowser
 
 from music_library import LibraryClient, LibrarySessionRequired
+import apple_web_login
 import settings
 
 
@@ -100,7 +102,7 @@ def build_account_page(app):
 
 
 def show_library_connection(app):
-    """Open the existing-token connection for the Apple Music library."""
+    """Connect Apple's official web login to the local library."""
     dialog = getattr(app, "library_connection_dialog", None)
     if dialog is None or not dialog.window.winfo_exists():
         app.library_connection_dialog = LibraryConnectionDialog(app)
@@ -112,7 +114,10 @@ class LibraryConnectionDialog:
     def __init__(self, app):
         self.app = app
         self._result = SimpleQueue()
+        self._progress = SimpleQueue()
+        self._stop = threading.Event()
         self._poll = None
+        self._start = None
         self._closing = False
 
         self.window = window = tk.Toplevel(app.window, background=app.background)
@@ -121,7 +126,7 @@ class LibraryConnectionDialog:
         window.resizable(False, False)
         window.protocol("WM_DELETE_WINDOW", self._dismiss)
         window.bind("<Escape>", self._dismiss)
-        window.bind("<Return>", self._connect)
+        window.bind("<Return>", lambda event: self._connect(event) if self.manual.winfo_ismapped() else self._connect_web())
 
         self.token = tk.StringVar(window)
         self.status = tk.StringVar(window)
@@ -129,23 +134,77 @@ class LibraryConnectionDialog:
         card.pack(fill="both", expand=True, padx=12, pady=12)
         card.columnconfigure(0, weight=1, minsize=round(333 * app.scale))
         app.label(card, "连接资料库", large=True).grid(row=0, column=0, sticky="w")
-        app.label(card, "输入你要连接的 Apple Music 账户的 Music User Token。", muted=True, wrap=330).grid(
+        app.label(card, "在 Apple 官方页面登录，完成后自动连接资料库。", muted=True, wrap=330).grid(
             row=1, column=0, sticky="w", pady=(6, 10)
         )
-        self.entry = ttk.Entry(card, textvariable=self.token, show="•", width=42)
-        self.entry.grid(row=2, column=0, sticky="ew")
-        app.label(card, variable=self.status, muted=True, wrap=330).grid(row=3, column=0, sticky="w", pady=(7, 0))
+        self.web_submit = app.action(card, "网页登录并连接", self._connect_web, primary=True)
+        self.web_submit.grid(row=2, column=0, sticky="ew")
+        self.manual_toggle = app.action(card, "使用已有会话令牌", self._show_manual)
+        self.manual_toggle.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.manual = ttk.Frame(card, style="Card.TFrame")
+        self.manual.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.manual.columnconfigure(0, weight=1)
+        self.entry = ttk.Entry(self.manual, textvariable=self.token, show="•", width=42)
+        self.entry.grid(row=0, column=0, sticky="ew")
+        self.submit = app.action(self.manual, "连接令牌", self._connect)
+        self.submit.grid(row=1, column=0, sticky="e", pady=(6, 0))
+        self.manual.grid_remove()
+        app.label(card, variable=self.status, muted=True, wrap=330).grid(row=5, column=0, sticky="w", pady=(7, 0))
         actions = ttk.Frame(card, style="Card.TFrame")
-        actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        actions.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         app.action(actions, "打开 Apple Music", lambda: webbrowser.open("https://music.apple.com/")).pack(side="left")
-        self.submit = app.action(actions, "连接", self._connect, primary=True)
-        self.submit.pack(side="right")
         app.action(actions, "取消", self._dismiss).pack(side="right", padx=(5, 7))
 
         window.grab_set()
+        self.web_submit.focus_set()
+        self._start = window.after(100, self._connect_web)
+
+    def _cancel_start(self):
+        if self._start is not None:
+            self.window.after_cancel(self._start)
+            self._start = None
+
+    def _show_manual(self):
+        self._cancel_start()
+        self.manual.grid()
         self.entry.focus_set()
 
+    def _set_connecting(self, active):
+        state = "disabled" if active else "normal"
+        for widget in (self.entry, self.submit, self.web_submit, self.manual_toggle):
+            widget.configure(state=state)
+
+    def _connect_web(self):
+        self._cancel_start()
+        if self._closing or self._poll is not None or self.app.closing:
+            return
+        if self.app.web_login_busy:
+            self.status.set("上一授权窗口正在关闭，请稍后重试。")
+            return
+        self.app.web_login_busy = True
+        self._set_connecting(True)
+        previous = (self.app.preferences.get("session"), self.app.preferences.get("native_account"))
+        region, catalog = self.app.catalog_region(), self.app.catalog
+        self.status.set("正在打开 Apple Music 官方登录窗口…")
+        self._poll = self.window.after(70, self._receive)
+        threading.Thread(target=self._verify_web, args=(region, catalog, previous), daemon=True).start()
+
+    def _verify_web(self, region, catalog, previous):
+        try:
+            token = apple_web_login.connect_library(
+                Path(__file__).resolve().parent, settings.DATA / "apple-web-profile", region,
+                catalog, self._stop, self._progress.put,
+            )
+            protected = settings.protect_session(token)
+        except (OSError, RuntimeError, ValueError) as error:
+            self._result.put((None, str(error) or "资料库授权未完成，请重试。", previous))
+        else:
+            self._result.put((protected, "", previous))
+        finally:
+            self.app.post("web_login_done", None)
+
     def _connect(self, _event=None):
+        self._cancel_start()
         if self._closing or self._poll is not None or self.app.closing:
             return "break"
         token = self.token.get().strip()
@@ -157,8 +216,7 @@ class LibraryConnectionDialog:
         previous = (preferences.get("session"), preferences.get("native_account"))
         region = self.app.catalog_region()
         catalog = self.app.catalog
-        self.entry.configure(state="disabled")
-        self.submit.configure(state="disabled", text="验证中…")
+        self._set_connecting(True)
         self.status.set("正在验证 Apple Music 资料库权限…")
         self._poll = self.window.after(70, self._receive)
         threading.Thread(target=self._verify, args=(token, region, catalog, previous), daemon=True).start()
@@ -179,6 +237,11 @@ class LibraryConnectionDialog:
         self._poll = None
         if self._closing or self.app.closing:
             return
+        while True:
+            try:
+                self.status.set(self._progress.get_nowait())
+            except Empty:
+                break
         try:
             protected, error, previous = self._result.get_nowait()
         except Empty:
@@ -198,12 +261,13 @@ class LibraryConnectionDialog:
                     self.app.show("library")
                     return
         self.status.set(error or "暂时无法验证资料库会话，请重试。")
-        self.entry.configure(state="normal")
-        self.submit.configure(state="normal", text="连接")
-        self.entry.focus_set()
+        self._set_connecting(False)
+        self.web_submit.focus_set()
 
     def _dismiss(self, _event=None):
         self._closing = True
+        self._stop.set()
+        self._cancel_start()
         if self._poll is not None:
             self.window.after_cancel(self._poll)
             self._poll = None

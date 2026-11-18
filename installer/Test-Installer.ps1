@@ -638,6 +638,88 @@ finally:
     app.close()
 print("Apple Music library authorization validation and encrypted storage passed.")
 
+import account_ui
+import apple_web_login
+
+web_files = ("AppleMusicLogin.exe", "Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll",
+             "WebView2Loader.dll", "WebView2-LICENSE.txt", "WebView2-NOTICE.txt",
+             "MicrosoftEdgeWebView2RuntimeInstallerX64.exe")
+assert all((root / "apple-web-login" / name).is_file() for name in web_files)
+from hashlib import file_digest
+runtime_installer = root / "apple-web-login/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+assert runtime_installer.stat().st_size == apple_web_login.RUNTIME_INSTALLER_SIZE
+with runtime_installer.open("rb") as source:
+    assert file_digest(source, "sha256").hexdigest() == apple_web_login.RUNTIME_INSTALLER_SHA256
+
+if apple_web_login.runtime_available():
+    web_ready, web_stop = threading.Event(), threading.Event()
+    def official_page(status):
+        if status.startswith("请在 Apple"):
+            web_ready.set()
+            web_stop.set()
+    timeout = threading.Timer(25, web_stop.set)
+    timeout.start()
+    try:
+        try:
+            apple_web_login.connect_library(root, profile / "official-webview-smoke", "au", Studio.CatalogClient(), web_stop, official_page)
+        except apple_web_login.Cancelled:
+            pass
+        else:
+            raise AssertionError("An isolated unsigned web profile returned an account token.")
+        assert web_ready.is_set(), "The official Apple Music page did not load in the bundled WebView helper."
+        apple_web_login.clear_profile(root, profile / "official-webview-smoke", threading.Event())
+    finally:
+        timeout.cancel()
+    print("Bundled native Apple web helper loaded the official page, cancelled cleanly and cleared its isolated profile.")
+
+window, app = new_window()
+try:
+    candidate = "fixture-official-web-token-" + "b" * 60
+    app.password.set("form-password-stays")
+    def official_connection(root_path, profile_path, region, catalog, stop, report):
+        assert root_path == root and profile_path == settings.DATA / "apple-web-profile"
+        report("正在验证 Apple Music 资料库授权…")
+        music_browser.LibraryClient(candidate, region, catalog=catalog).items(limit=1)
+        return candidate
+    with patch.object(apple_web_login, "connect_library", side_effect=official_connection), \
+         patch.object(app.catalog, "request", return_value={"data": []}) as authorized:
+        app.connect_library()
+        wait_for(window, lambda: app.active_page == "library" and app.library_token() == candidate and not app.web_login_busy)
+        assert authorized.call_args_list[0].kwargs["user_token"] == candidate
+        assert candidate not in settings.FILE.read_text(encoding="utf-8")
+        assert app.password.get() == "form-password-stays"
+    app.clear_account()
+
+    started, released = threading.Event(), threading.Event()
+    def delayed_connection(*args):
+        started.set()
+        assert released.wait(10)
+        return candidate
+    with patch.object(apple_web_login, "connect_library", side_effect=delayed_connection):
+        app.connect_library()
+        wait_for(window, started.is_set)
+        dialog = app.library_connection_dialog
+        dialog._dismiss()
+        assert dialog._stop.is_set()
+        released.set()
+        wait_for(window, lambda: not app.web_login_busy)
+        assert not app.library_token()
+    web_profile = settings.DATA / "apple-web-profile"
+    web_profile.mkdir(parents=True, exist_ok=True)
+    with patch.object(apple_web_login, "clear_profile", side_effect=RuntimeError("fixture cleanup failure")):
+        app.clear_account()
+        wait_for(window, lambda: not app.web_profile_clearing)
+    assert app.preferences["apple_web_clear_pending"] and settings.load()["apple_web_clear_pending"]
+    assert str(app.logout_button.cget("state")) == "normal"
+    with patch.object(apple_web_login, "clear_profile", return_value=None) as cleared:
+        app.logout_button.invoke()
+        wait_for(window, lambda: not app.web_profile_clearing and not app.preferences["apple_web_clear_pending"])
+        cleared.assert_called_once_with(root, web_profile, app.web_profile_stop)
+    web_profile.rmdir()
+finally:
+    app.close()
+print("Apple official authorization automatically opened the library, encrypted the validated session and ignored cancelled results.")
+
 original_parts = bili_catalog._fetch_parts
 original_metadata = bili_catalog._fetch_video_metadata
 original_bili_download = apple_download.download_video

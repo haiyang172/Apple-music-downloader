@@ -1,5 +1,5 @@
 ﻿#ifndef AppVersion
-  #define AppVersion "0.3.32"
+  #define AppVersion "0.3.33"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "dist\amdl"
@@ -60,6 +60,7 @@ Name: "{autoprograms}\{#StudioAppName}"; Filename: "{app}\{#StudioExecutable}"; 
 Name: "{autodesktop}\{#StudioAppName}"; Filename: "{app}\{#StudioExecutable}"; WorkingDir: "{app}"; AppUserModelID: "{#StudioAppId}"; Tasks: desktopicon; Check: not IsExtractMode
 
 [Run]
+Filename: "{app}\apple-web-login\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/silent /install"; Flags: runhidden waituntilterminated; Check: NeedsWebViewRuntime
 Filename: "{app}\{#StudioExecutable}"; Description: "{cm:LaunchStudio}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsExtractMode
 
 [CustomMessages]
@@ -72,6 +73,22 @@ english.LaunchStudio=Open Media Download Desk
 function IsExtractMode: Boolean;
 begin
   Result := ExpandConstant('{param:EXTRACTONLY|0}') = '1';
+end;
+
+function NeedsWebViewRuntime: Boolean;
+var
+  Version: String;
+  Key: String;
+begin
+  Result := False;
+  if IsExtractMode then
+    Exit;
+  Key := 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  if RegQueryStringValue(HKCU, Key, 'pv', Version) and (Version <> '') and (Version <> '0.0.0.0') then
+    Exit;
+  if RegQueryStringValue(HKLM32, Key, 'pv', Version) and (Version <> '') and (Version <> '0.0.0.0') then
+    Exit;
+  Result := True;
 end;
 
 function InitializeSetup: Boolean;
