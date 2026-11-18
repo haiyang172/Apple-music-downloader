@@ -18,11 +18,7 @@ _BASE = "https://www.youtube.com"
 _HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 _PLAYLIST_ID = re.compile(r"[A-Za-z0-9_-]{2,120}")
-_PLAYLIST_LIMIT = 500
-_SEARCH_LIMIT = 500
 _SEARCH_PAGE_SIZE = 50
-_SEARCH_TEMPLATE = ("%(.{id,title,channel,uploader,availability,live_status,is_live,is_upcoming,age_limit,has_drm,"
-                    "ie_key,duration,playlist_index})j")
 _OUTPUT_LIMIT = 16 * 1024 * 1024
 _ACCESS_ERROR = "YouTube 未提供可访问的完整视频。请在浏览器中确认链接。"
 _LINK_ERROR = "请输入 YouTube 视频、Shorts 或播放列表链接。"
@@ -192,7 +188,7 @@ def _resolved(payload, kind, identifier):
     count = payload.get("playlist_count")
     total = count if type(count) is int and count >= len(entries) else len(entries)
     rows = []
-    for position, entry in enumerate(entries[:_PLAYLIST_LIMIT], 1):
+    for position, entry in enumerate(entries, 1):
         if not isinstance(entry, dict) or not _eligible(entry, flat=True):
             continue
         video_id = entry.get("id")
@@ -202,9 +198,7 @@ def _resolved(payload, kind, identifier):
         raise RuntimeError("播放列表没有可加入队列的公开视频。")
     result = {"title": title, "rows": rows}
     warnings = []
-    if total > _PLAYLIST_LIMIT:
-        warnings.append(f"仅显示前 {_PLAYLIST_LIMIT} 项")
-    skipped = min(_PLAYLIST_LIMIT, len(entries)) - len(rows)
+    skipped = len(entries) - len(rows)
     if skipped:
         warnings.append(f"已跳过 {skipped} 个不可用视频")
     if warnings:
@@ -213,13 +207,32 @@ def _resolved(payload, kind, identifier):
 
 
 def resolve_youtube(value, stop=None):
-    """Resolve a single YouTube video, or the first 500 entries in an explicit playlist."""
+    """Resolve a video or fully expand an explicitly requested public playlist."""
     kind, identifier, url = _parse(value)
-    flags = ["--dump-single-json"]
     if kind == "playlist":
-        flags.extend(("--yes-playlist", "--flat-playlist", "--playlist-items", f"1:{_PLAYLIST_LIMIT + 1}"))
-    else:
-        flags.append("--no-playlist")
+        from youtube_browse import YoutubeBrowser
+
+        browser = YoutubeBrowser(url)
+        stop = stop if stop is not None else Event()
+        rows = []
+        try:
+            while True:
+                page = browser.page(stop=stop)
+                rows.extend(page["rows"])
+                if page.get("next_offset") is None:
+                    break
+        finally:
+            browser.close()
+        if not rows:
+            raise RuntimeError("播放列表没有可加入队列的公开视频。")
+        total = page.get("total")
+        result = {"source": "youtube", "title": page["title"], "total": total,
+                  "rows": [dict(row, total=total) for row in rows]}
+        if type(total) is int and total > len(rows):
+            result["warning"] = f"已跳过 {total - len(rows)} 个不可用视频"
+        return result
+    flags = ["--dump-single-json"]
+    flags.append("--no-playlist")
     with TemporaryDirectory(prefix="amdl-youtube-") as temporary:
         raw = _run([*flags, "--", url], temporary, stop if stop is not None else Event(), 90)
     try:
@@ -230,47 +243,24 @@ def resolve_youtube(value, stop=None):
 
 
 def search_youtube(query, *, stop=None, offset=0, limit=50):
-    """Search a bounded range of public YouTube video results."""
-    query = " ".join(query.split()) if isinstance(query, str) else ""
-    if not 0 < len(query) <= 120 or any(ord(char) < 32 or char == "\x7f" or "\ud800" <= char <= "\udfff" for char in query):
-        raise ValueError("请输入 1–120 字的 YouTube 搜索关键词。")
+    """Read a public search page; UI callers keep YoutubeBrowser for continuation."""
+    from youtube_browse import YoutubeBrowser
+
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= _SEARCH_PAGE_SIZE:
         raise ValueError("YouTube 搜索分页参数无效。")
     stop = stop if stop is not None else Event()
     _stop(stop)
-    result = {"source": "youtube", "title": query, "rows": [], "total": None, "next_offset": None}
-    if offset >= _SEARCH_LIMIT:
-        return result
-
-    end = min(offset + limit, _SEARCH_LIMIT)
-    last = min(end + 1, _SEARCH_LIMIT)
-    flags = ["--flat-playlist", "--skip-download", "--print", _SEARCH_TEMPLATE,
-             "--playlist-items", f"{offset + 1}:{last}", "--", f"ytsearch{last}:{query}"]
-    with TemporaryDirectory(prefix="amdl-youtube-search-") as temporary:
-        raw = _run(flags, temporary, stop, 90, search=True)
-
-    by_position = {}
-    for line in raw.splitlines():
-        try:
-            item = json.loads(line)
-        except (UnicodeDecodeError, ValueError):
-            raise RuntimeError("YouTube 返回的搜索结果无法读取。") from None
-        if not isinstance(item, dict):
-            continue
-        position = item.get("playlist_index")
-        if type(position) is not int or not offset < position <= last:
-            continue
-        if position > end:
-            result["next_offset"] = end
-            continue
-        video_id = item.get("id")
-        if (item.get("ie_key") == "Youtube" and isinstance(video_id, str) and _VIDEO_ID.fullmatch(video_id)
-                and item.get("availability") != "unlisted"
-                and _eligible(item, flat=True)):
-            by_position.setdefault(position, _row(item, video_id, position))
-    _stop(stop)
-    result["rows"] = [by_position[position] for position in sorted(by_position)]
-    return result
+    browser = YoutubeBrowser(query, search=True)
+    try:
+        cursor = 0
+        while cursor < offset:
+            page = browser.page(stop=stop, limit=min(_SEARCH_PAGE_SIZE, offset - cursor))
+            cursor = page.get("next_offset")
+            if cursor is None:
+                return {**page, "rows": []}
+        return browser.page(stop=stop, limit=limit)
+    finally:
+        browser.close()
 
 
 def download_youtube(url, mode, stage, ffmpeg, stop, on_status):

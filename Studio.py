@@ -37,7 +37,7 @@ from bili_catalog import is_video_link, resolve_video
 from bili_collections import is_collection_link, resolve_collection
 from bili_favorites_cache import BiliFavoritesCache
 from bili_ui import BiliBrowser
-from download_queue import QueueStore
+from download_queue import QueueCancelled, QueueStore
 from engine import Engine
 from library_cache import LibraryCache
 from local_convert import formats_for
@@ -125,6 +125,14 @@ def configure_windows():
         pass
 
 
+class _QueueImportStop:
+    def __init__(self, owned, external):
+        self.owned, self.external = owned, external
+
+    def is_set(self):
+        return self.owned.is_set() or (self.external is not None and self.external.is_set())
+
+
 class Studio:
     def __init__(self, window):
         self.window = window
@@ -145,6 +153,11 @@ class Studio:
         self.queue_store = QueueStore(settings.DATA / "downloads.sqlite3")
         recovered = self.queue_store.recover()
         self.tasks = {}
+        self.queue_adding = False
+        self.queue_add_stop = threading.Event()
+        self.queue_add_job = None
+        self.queue_add_serial = 0
+        self.queue_add_render_timer = None
         self.task_details_serial = 0
         self.resolving_links = False
         self.links_stop = threading.Event()
@@ -155,6 +168,7 @@ class Studio:
         self.preview_timer = None
         self.busy = False
         self.closing = False
+        self.closed = False
         self.service_busy = False
         self.auth_busy = False
         self.web_login_busy = False
@@ -664,6 +678,9 @@ class Studio:
         return self.enqueue_tasks(rows, begin)
 
     def queue_local(self, paths, output, folder):
+        if self.closing or self.queue_adding:
+            self.status.set("正在加入上一批任务，请稍候。")
+            return 0
         rows = []
         start_ids = []
         try:
@@ -757,6 +774,9 @@ class Studio:
         return next(key for key, label in QUEUE_SOURCES.items() if label == self.queue_source.get())
 
     def enqueue_tasks(self, rows, begin):
+        if self.closing or self.queue_adding:
+            self.status.set("正在加入上一批任务，请稍候。")
+            return 0
         try:
             tasks = self._add_tasks(rows)
         except (OSError, sqlite3.Error, ValueError) as error:
@@ -767,6 +787,125 @@ class Studio:
             self.show_download_source(next(iter(sources)) if len(sources) == 1 else "all")
             self.start_download(tasks)
         return len(tasks)
+
+    def enqueue_tasks_async(self, rows, begin, *, stop=None, on_done=None):
+        """Import a prepared row snapshot atomically; report completion on the UI thread."""
+        if self.closing or self.queue_adding or self.resolving_links:
+            self.status.set("正在加入上一批任务，请稍候。")
+            return False
+        self.queue_add_serial += 1
+        serial = self.queue_add_serial
+        self.queue_add_stop = threading.Event()
+        cancelled = _QueueImportStop(self.queue_add_stop, stop)
+        self.queue_add_job = {"serial": serial, "writing": True, "ids": [], "offset": 0,
+                              "error": "", "cancelled": False, "stop": cancelled,
+                              "begin": begin, "on_done": on_done}
+        self.queue_adding = True
+        self._refresh_queue_actions()
+        self.status.set("正在加入下载队列…")
+
+        def write():
+            identifiers, error, was_cancelled = [], "", False
+            try:
+                tasks = self.queue_store.add(rows, stop=cancelled)
+                identifiers = list(dict.fromkeys(task.id for task in tasks))
+                was_cancelled = cancelled.is_set()
+            except QueueCancelled:
+                was_cancelled = True
+            except (OSError, RuntimeError, ValueError, TypeError, sqlite3.Error) as problem:
+                error = str(problem)
+            except Exception as problem:
+                error = f"加入队列时遇到意外错误（{type(problem).__name__}）。"
+            self.post("queue_add_result", (serial, identifiers, error, was_cancelled))
+
+        try:
+            threading.Thread(target=write, daemon=True).start()
+        except (OSError, RuntimeError) as error:
+            self.post("queue_add_result", (serial, [], f"无法启动队列导入：{error}", False))
+        return True
+
+    def _refresh_queue_actions(self):
+        state = "disabled" if self.busy or self.queue_adding else "normal"
+        self.start_button.configure(state=state)
+        self.remove_button.configure(state=state)
+        self.add_link_button.configure(state="disabled" if self.queue_adding or self.resolving_links else "normal")
+
+    def _receive_queue_import(self, serial, identifiers, error, cancelled):
+        job = self.queue_add_job
+        if job is None or serial != job["serial"]:
+            return False
+        job.update(writing=False, ids=identifiers, error=error, cancelled=cancelled)
+        if self.closing or not identifiers:
+            return self._finish_queue_import()
+        self.queue_add_render_timer = self.window.after(1, self._render_queue_import)
+        return False
+
+    def _render_queue_import(self):
+        self.queue_add_render_timer = None
+        job = self.queue_add_job
+        if job is None:
+            return
+        if self.closing:
+            self._finish_queue_import()
+            return
+        start = job["offset"]
+        chunk = job["ids"][start:start + 100]
+        try:
+            # The download worker may have advanced a task since the import committed.
+            for task in self.queue_store.get_many(chunk):
+                self.render_task(task)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            job["error"] = f"任务已保存在队列中，但无法更新列表：{error}"
+            self._finish_queue_import()
+            return
+        job["offset"] += len(chunk)
+        if job["offset"] < len(job["ids"]):
+            if not self.busy:
+                self.status.set(f"正在更新下载队列…{job['offset']}/{len(job['ids'])}")
+            self.queue_add_render_timer = self.window.after(1, self._render_queue_import)
+        else:
+            self._finish_queue_import()
+
+    def _finish_queue_import(self):
+        job = self.queue_add_job
+        if job is None:
+            return False
+        if self.queue_add_render_timer is not None:
+            self.window.after_cancel(self.queue_add_render_timer)
+            self.queue_add_render_timer = None
+        identifiers = job["ids"]
+        error = job["error"]
+        cancelled = bool(job["cancelled"] or job["stop"].is_set() or self.closing)
+        self.queue_add_job = None
+        self.queue_adding = False
+        if not self.closing:
+            self._refresh_queue_actions()
+            self.queue_sort.apply()
+            self.update_queue_count()
+            cancelled = bool(cancelled or job["stop"].is_set())
+            if error:
+                self.status.set(error)
+            elif cancelled:
+                self.status.set(f"已保留队列中的 {len(identifiers)} 项，已取消自动下载。" if identifiers else "已取消加入队列。")
+            else:
+                self.status.set(f"已加入队列 {len(identifiers)} 项")
+            if identifiers and job["begin"] and not error and not cancelled:
+                sources = {self.tasks[task_id].source for task_id in identifiers if task_id in self.tasks}
+                self.show_download_source(next(iter(sources)) if len(sources) == 1 else "all")
+                cancelled = bool(job["stop"].is_set())
+                if cancelled:
+                    self.status.set(f"已保留队列中的 {len(identifiers)} 项，已取消自动下载。")
+                else:
+                    self.start_download(identifiers)
+        callback = job["on_done"]
+        if callback is not None:
+            try:
+                callback(len(identifiers), error, cancelled)
+            except Exception:
+                self.window.report_callback_exception(*sys.exc_info())
+        elif error and not self.closing:
+            self.error("无法加入队列", error)
+        return self.finish_close() if self.closing else False
 
     def _add_tasks(self, rows):
         tasks = {task.id: task for task in self.queue_store.add(rows)}
@@ -799,7 +938,9 @@ class Studio:
         self.navigation["download"].configure(text=f"下载队列  {pending}" if pending else "下载队列")
 
     def remove_queued(self):
-        if self.busy:
+        if self.busy or self.closing or self.queue_adding:
+            if self.queue_adding:
+                self.status.set("正在加入上一批任务，请稍候。")
             return
         rows = self.queue_tree.selection()
         try:
@@ -909,7 +1050,7 @@ class Studio:
             menu.add_command(label="导出播放列表（M3U8）", command=self.export_queue_playlist)
         remote = all(self.tasks[int(item)].source != "local" for item in self.queue_tree.selection())
         menu.add_command(label="按当前设置重新排队", command=self.requeue_selected,
-                         state="normal" if remote and not self.busy else "disabled")
+                         state="normal" if remote and not self.busy and not self.queue_adding else "disabled")
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -943,7 +1084,9 @@ class Studio:
             self.status.set(f"已导出 {count} 首 · {Path(path).name}")
 
     def requeue_selected(self):
-        if self.busy:
+        if self.busy or self.closing or self.queue_adding:
+            if self.queue_adding:
+                self.status.set("正在加入上一批任务，请稍候。")
             return
         if any(self.tasks[int(row)].source == "local" for row in self.queue_tree.selection()):
             return
@@ -983,6 +1126,9 @@ class Studio:
         return SOURCE
 
     def add_link_text(self, text, begin=False):
+        if self.closing or self.queue_adding:
+            self.status.set("正在加入上一批任务，请稍候。")
+            return False
         if self.resolving_links:
             self.status.set("正在读取上一批链接…")
             self.show("download")
@@ -1059,6 +1205,28 @@ class Studio:
             return
         for error in errors:
             self.log_message(error)
+        if len(rows) > 500:
+            def complete(count, error, cancelled):
+                self.resolving_links = False
+                if self.closing:
+                    return
+                self._refresh_queue_actions()
+                if error:
+                    self.log_message(error)
+                if not self.busy:
+                    if cancelled:
+                        self.status.set(f"已保留队列中的 {count} 项，已取消自动下载。" if count else "已取消加入队列。")
+                    elif error:
+                        self.status.set(error)
+                    elif errors:
+                        self.status.set(f"已加入 {count} 项 · {errors[0]}" if len(errors) == 1 else
+                                        f"已加入 {count} 项 · {len(errors)} 个链接未能读取")
+                    else:
+                        self.status.set(f"已加入队列 {count} 项")
+
+            if self.enqueue_tasks_async(rows, begin, on_done=complete):
+                self.resolving_links = True
+            return
         count = self.enqueue_tasks(rows, begin=begin)
         if not self.busy:
             if errors:
@@ -1744,6 +1912,10 @@ class Studio:
         return self.engine
 
     def start_download(self, task_ids=None):
+        if self.closing or self.queue_adding:
+            if self.queue_adding:
+                self.status.set("正在加入上一批任务，请稍候。")
+            return
         if self.busy:
             return
         try:
@@ -1822,8 +1994,7 @@ class Studio:
     def set_busy(self, busy):
         self.busy = busy
         state = "disabled" if busy else "normal"
-        self.start_button.configure(state=state)
-        self.remove_button.configure(state=state)
+        self._refresh_queue_actions()
         self.quality_box.configure(state="disabled" if busy else "readonly")
         self.bili_format_box.configure(state="disabled" if busy else "readonly")
         self.youtube_format_box.configure(state="disabled" if busy else "readonly")
@@ -1846,7 +2017,14 @@ class Studio:
         self.status.set("正在暂停…")
 
     def close(self):
+        if self.closing:
+            self.finish_close()
+            return
         self.closing = True
+        self.queue_add_stop.set()
+        if self.queue_add_render_timer is not None:
+            self.window.after_cancel(self.queue_add_render_timer)
+            self.queue_add_render_timer = None
         self.web_profile_stop.set()
         dialog = getattr(self, "library_connection_dialog", None)
         if dialog is not None:
@@ -1854,7 +2032,7 @@ class Studio:
         self.links_stop.set()
         self.bili_browser.stop.set()
         for page in self.video_link_pages.values():
-            page.stop.set()
+            page.close()
         self.bili_browser.account.close()
         for browser in self.shared_music_browsers.values():
             browser.close()
@@ -1866,10 +2044,15 @@ class Studio:
         self.reset_login()
         if self.busy:
             self.pause()
+        if self.queue_adding and not self.queue_add_job["writing"]:
+            self._finish_queue_import()
+            return
         self.finish_close()
 
     def finish_close(self):
-        if (not self.closing or self.busy or self.service_busy or self.auth_busy
+        if self.closed:
+            return True
+        if (not self.closing or self.busy or self.queue_adding or self.service_busy or self.auth_busy
                 or self.web_login_busy or self.web_profile_clearing):
             return False
         try:
@@ -1881,11 +2064,12 @@ class Studio:
             self.login_service.close()
         except (OSError, RuntimeError):
             pass
-        for timer in (self.start_timer, self.pump_timer, self.update_timer):
+        for timer in (self.start_timer, self.pump_timer, self.update_timer, self.queue_add_render_timer):
             if timer:
                 self.window.after_cancel(timer)
         if self.drop_cleanup is not None:
             self.drop_cleanup()
+        self.closed = True
         self.window.destroy()
         return True
 
@@ -1910,10 +2094,22 @@ class Studio:
             elif kind == "log":
                 self.log_message(value)
             elif kind == "queue_task":
-                self.render_task(value)
-                if self.queue_sort.column == "state":
-                    self.queue_sort.apply()
-                self.update_queue_count()
+                if self.closing:
+                    continue
+                try:
+                    current = self.queue_store.get(value.id)
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    self.log_message(f"无法更新下载任务：{error}")
+                    continue
+                if current is not None:
+                    self.render_task(current)
+                    if not self.queue_adding:
+                        if self.queue_sort.column == "state":
+                            self.queue_sort.apply()
+                        self.update_queue_count()
+            elif kind == "queue_add_result":
+                if self._receive_queue_import(*value):
+                    return
             elif kind == "task_details":
                 serial, task_id, records = value
                 task = self.tasks.get(task_id)
@@ -1939,6 +2135,8 @@ class Studio:
                 self.bili_browser.receive_favorites(*value)
             elif kind == "youtube_result":
                 self.video_link_pages["youtube"].receive(*value)
+            elif kind == "youtube_batch":
+                self.video_link_pages["youtube"].receive_batch(*value)
             elif kind == "bili_auth":
                 self.bili_browser.account.receive(*value)
             elif kind == "qq_auth":

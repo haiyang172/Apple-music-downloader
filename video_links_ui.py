@@ -1,6 +1,7 @@
 """Search YouTube and open YouTube or Douyin links."""
 
 import re
+from collections import deque
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -8,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 import webbrowser
 
 from share_links import links_in_text
+from youtube_browse import YoutubeBrowser
 
 
 SOURCES = {"youtube": "YouTube", "douyin": "抖音"}
@@ -124,6 +126,14 @@ class VideoLinkPage:
         self.page_error = False
         self.seen = set()
         self.stop = threading.Event()
+        self.browser = None
+        self.playlist = False
+        self.resolved_value = ""
+        self.total = None
+        self.pending_pages = deque()
+        self.pending_count = 0
+        self.queue_pending = False
+        self.view_timer = None
         name = SOURCES[source]
 
         page.columnconfigure(0, weight=1)
@@ -148,8 +158,9 @@ class VideoLinkPage:
         self.entry.bind("<Return>", self.open_original)
         self.open_button = app.action(card, "在浏览器打开", self.open_original, primary=source == "douyin")
         self.open_button.grid(row=1, column=1, padx=(8, 0), pady=(8, 0))
-        ttk.Label(card, textvariable=self.status, style="MusicStatus.TLabel").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(card, textvariable=self.status, style="MusicStatus.TLabel", width=1,
+                  wraplength=round(425 * app.scale)).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         if source == "youtube":
             self._build_downloads(page, card)
         else:
@@ -198,7 +209,7 @@ class VideoLinkPage:
             self.busy = False
             self._clear_results()
             self.caption.set("视频")
-            self.read_button.configure(state="normal" if recognized or query else "disabled")
+            self.read_button.configure(text="查找", state="normal" if recognized or query else "disabled")
             self._update_download_buttons()
 
     @staticmethod
@@ -274,13 +285,33 @@ class VideoLinkPage:
         self.tree.bind("<<TreeviewSelect>>", self._update_download_buttons)
 
     def _clear_results(self):
+        self.close()
         self.search_query = ""
+        self.playlist = False
+        self.resolved_value = ""
+        self.total = None
+        self.pending_pages.clear()
+        self.pending_count = 0
+        self.queue_pending = False
         self.next_offset = None
         self.page_error = False
         self.seen.clear()
         self.rows.clear()
         self.tree.delete(*self.tree.get_children())
+        self.retry_button.configure(text="重试", command=self._load_next)
         self.retry_button.grid_remove()
+
+    def close(self):
+        self.stop.set()
+        if self.view_timer is not None:
+            try:
+                self.tree.after_cancel(self.view_timer)
+            except tk.TclError:
+                pass
+            self.view_timer = None
+        if self.browser is not None:
+            self.browser.close()
+            self.browser = None
 
     def _select_all(self, _event):
         self.tree.selection_set(self.tree.get_children())
@@ -288,14 +319,21 @@ class VideoLinkPage:
 
     def _update_download_buttons(self, _event=None):
         selection = self.tree.selection()
-        state = "normal" if self.rows and (selection or not self.search_query) else "disabled"
-        self.queue_button.configure(state=state)
-        self.download_button.configure(state=state)
+        whole_playlist = self.playlist and not selection
+        permitted = bool(self.rows or (whole_playlist and self.next_offset is not None))
+        state = "normal" if permitted and not self.busy and (selection or not self.search_query) else "disabled"
+        self.queue_button.configure(state=state, text="全部入队" if whole_playlist else "加入队列")
+        download_text = "下载全部" if whole_playlist else "下载所选" if self.browser is not None else "下载"
+        self.download_button.configure(state=state, text=download_text)
         if self.search_query:
             self.open_button.configure(state="normal" if len(selection) == 1 else "disabled")
 
     def resolve(self, _event=None):
-        if self.busy or self.app.closing:
+        if self.app.closing:
+            return "break"
+        if self.busy:
+            self.stop.set()
+            self.status.set("正在停止…")
             return "break"
         value = self.link.get().strip()
         link = self._page_link(value)
@@ -303,6 +341,17 @@ class VideoLinkPage:
             self._clear_results()
             if not link:
                 self.search_query = value
+            else:
+                from youtube_download import _parse
+                self.playlist = _parse(link)[0] == "playlist"
+            self.resolved_value = link or value
+            if self.search_query or self.playlist:
+                try:
+                    self.browser = YoutubeBrowser(self.resolved_value, search=bool(self.search_query))
+                except (OSError, RuntimeError, ValueError) as error:
+                    self.status.set(str(error))
+                    return "break"
+                self.next_offset = 0
             self._read(link or value)
         return "break"
 
@@ -313,36 +362,41 @@ class VideoLinkPage:
             self._load_next()
 
     def _load_next(self):
-        if self.busy or self.app.closing or not self.search_query or self.next_offset is None:
+        if self.busy or self.app.closing or self.browser is None or self.next_offset is None:
             return
         self.page_error = False
         self.retry_button.grid_remove()
-        self._read(self.search_query, offset=self.next_offset)
+        self._read(self.resolved_value, offset=self.next_offset)
 
     def _read(self, value, *, offset=0):
-        search = bool(self.search_query)
+        self.retry_button.configure(text="重试", command=self._load_next)
         self.serial += 1
         serial = self.serial
         self.stop.set()
         self.stop = stop = threading.Event()
         self.busy = True
-        self.read_button.configure(state="disabled")
+        self.read_button.configure(text="停止", state="normal")
         self.status.set("正在加载更多视频…" if offset else "正在查找 YouTube…")
         self._update_download_buttons()
+        if self.pending_pages:
+            result = self.pending_pages.popleft()
+            self.pending_count -= len(result["rows"])
+            self.receive(serial, result, "", offset)
+            return
+        browser = self.browser
 
         def fetch():
-            from youtube_download import resolve_youtube, search_youtube
+            from youtube_download import resolve_youtube
 
             try:
-                if search:
-                    result = search_youtube(value, stop=stop, offset=offset)
+                if browser is not None:
+                    result = browser.page(stop=stop)
                 else:
                     result = resolve_youtube(value, stop=stop)
                 error = ""
             except (OSError, RuntimeError, ValueError) as problem:
                 result, error = None, str(problem)
-            if not stop.is_set():
-                self.app.post("youtube_result", (serial, result, error, offset))
+            self.app.post("youtube_result", (serial, result, error, offset))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -350,15 +404,15 @@ class VideoLinkPage:
         if serial != self.serial or self.app.closing:
             return
         self.busy = False
-        self.read_button.configure(state="normal")
+        self.read_button.configure(text="查找", state="normal")
         if error:
             self.status.set(error)
-            if offset:
+            if self.browser is not None and self.next_offset is not None:
                 self.page_error = True
                 self.retry_button.grid()
+            self._update_download_buttons()
             return
         self.caption.set(result["title"])
-        previous = len(self.rows)
         for item in result["rows"]:
             if self.search_query:
                 url = item["url"]
@@ -368,17 +422,144 @@ class VideoLinkPage:
             row = self.tree.insert("", "end", values=(item["title"], item.get("artist", "")))
             self.rows[row] = item
         cursor = result.get("next_offset")
-        progressed = type(cursor) is int and cursor > offset and len(self.rows) > previous
-        self.next_offset = cursor if self.search_query and progressed else None
-        if len(self.rows) == 1 and not offset:
+        self.next_offset = cursor if self.browser is not None and type(cursor) is int and cursor > offset else None
+        count = result.get("total")
+        if type(count) is int and count >= 0:
+            self.total = count
+        if len(self.rows) == 1 and not offset and self.browser is None:
             self.tree.selection_set(next(iter(self.rows)))
-        status = f"已显示 {len(self.rows)} 项" if self.rows else "没有找到视频。"
-        self.status.set(result.get("warning") or status)
+        suffix = f" / {self.total}" if self.total is not None else ""
+        status = f"已显示 {len(self.rows)}{suffix} 项" if self.rows or self.next_offset is not None else "没有找到视频。"
+        warning = result.get("warning")
+        self.status.set(status + (" · " + warning if warning else ""))
+        self.page_error = bool(self.stop.is_set() and self.next_offset is not None)
+        if self.page_error:
+            self.status.set("已停止读取 · " + status)
+            self.retry_button.configure(text="继续读取", command=self._load_next)
+            self.retry_button.grid()
         self._update_download_buttons()
+        if not self.page_error:
+            if self.view_timer is not None:
+                self.tree.after_cancel(self.view_timer)
+            self.view_timer = self.tree.after_idle(self._fill_view)
+
+    def _fill_view(self):
+        self.view_timer = None
+        if (not self.busy and not self.page_error and not self.app.closing and self.tree.winfo_viewable()
+                and self.app.active_page == self.source and float(self.tree.yview()[1]) >= 0.95):
+            self._load_next()
 
     def _enqueue(self, begin):
+        if self.busy or self.app.closing:
+            return
         selected = self.tree.selection()
+        if self.playlist and not selected:
+            self._enqueue_all(begin)
+            return
         if not selected and not self.search_query:
             selected = self.tree.get_children()
         if selected:
             self.app.enqueue_tasks((self.rows[row] for row in selected), begin)
+
+    def _enqueue_all(self, begin, *, captured_options=None):
+        if self.browser is None or getattr(self.app, "queue_adding", False):
+            self.status.set("请等当前列表入队完成。")
+            return
+        options = captured_options
+        if begin and options is None:
+            try:
+                choices = self.app.snapshot()
+                if not choices["folder"]:
+                    self.app.browse_folder()
+                    choices = self.app.snapshot()
+                    if not choices["folder"]:
+                        return
+                from apple_download import download_options
+                options = download_options(choices)
+                self.app.store(choices)
+            except (OSError, RuntimeError, ValueError) as error:
+                self.app.error("请检查下载设置", error)
+                return
+        self.serial += 1
+        serial = self.serial
+        self.stop.set()
+        self.stop = stop = threading.Event()
+        browser = self.browser
+        rows = list(self.rows.values())
+        for page in self.pending_pages:
+            rows.extend(page["rows"])
+        cursor = self.pending_pages[-1].get("next_offset") if self.pending_pages else self.next_offset
+        self.busy = True
+        self.page_error = False
+        self.retry_button.grid_remove()
+        self.read_button.configure(text="停止", state="normal")
+        self.status.set(f"正在读取整个播放列表 · 已读取 {len(rows)} 项")
+        self._update_download_buttons()
+
+        def fetch():
+            error = ""
+            try:
+                nonlocal cursor
+                while cursor is not None:
+                    if stop.is_set():
+                        raise RuntimeError("已停止读取整个播放列表。")
+                    result = browser.page(stop=stop)
+                    rows.extend(result["rows"])
+                    cursor = result.get("next_offset")
+                    self.app.post("youtube_batch", (serial, "page", result))
+                if stop.is_set():
+                    raise RuntimeError("已停止读取整个播放列表。")
+            except (OSError, RuntimeError, ValueError) as problem:
+                error = str(problem)
+            self.app.post("youtube_batch", (serial, "done", (rows, error, begin, options)))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def receive_batch(self, serial, phase, payload):
+        if serial != self.serial or self.app.closing:
+            return
+        if phase == "page":
+            self.pending_pages.append(payload)
+            self.pending_count += len(payload["rows"])
+            if type(payload.get("total")) is int:
+                self.total = payload["total"]
+            self.status.set(f"正在读取整个播放列表 · 已读取 {len(self.rows) + self.pending_count} 项")
+            return
+        rows, error, begin, options = payload
+        if error:
+            self.busy = False
+            self.read_button.configure(text="查找", state="normal")
+            self.status.set(error + " · 尚未加入队列")
+            self.page_error = self.next_offset is not None
+            if self.page_error:
+                self.retry_button.configure(text="重试整个列表",
+                                            command=lambda: self._enqueue_all(begin, captured_options=options))
+                self.retry_button.grid()
+            self._update_download_buttons()
+            return
+        total = self.total
+        if type(total) is int:
+            rows = [dict(row, total=total) for row in rows]
+        if options is not None:
+            rows = [dict(row, options=options) for row in rows]
+        self.status.set(f"正在加入 {len(rows)} 个任务…")
+        self.queue_pending = True
+
+        def done(count, failure, cancelled):
+            if serial != self.serial or self.app.closing:
+                return
+            self.queue_pending = False
+            self.busy = False
+            self.read_button.configure(text="查找", state="normal")
+            if failure:
+                self.status.set(failure)
+            elif cancelled and not count:
+                self.status.set("已停止加入队列。")
+            elif cancelled:
+                self.status.set(f"已加入 {count} 项 · 已停止自动下载")
+            else:
+                self.status.set(f"已加入整个播放列表 · {count} 项")
+            self._update_download_buttons()
+
+        if not self.app.enqueue_tasks_async(rows, begin, stop=self.stop, on_done=done):
+            done(0, "请等当前列表入队完成。", False)

@@ -16,6 +16,10 @@ from storage import _plain_directory
 STATES = frozenset({"pending", "running", "complete", "failed", "interrupted", "cancelled"})
 
 
+class QueueCancelled(RuntimeError):
+    """An import was cancelled before its transaction committed."""
+
+
 def _enable_wal(connection):
     deadline = time.monotonic() + 10
     while True:
@@ -183,11 +187,15 @@ class QueueStore:
     def _get(db, task_id):
         return _task(db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
 
-    def add(self, items):
+    def add(self, items, *, stop=None):
         """Add rows in input order, reusing existing rows with the same identity."""
+        if stop is not None and stop.is_set():
+            raise QueueCancelled("已取消加入队列。")
         result = []
         with closing(self._connect()) as db, db:
             for item in items:
+                if stop is not None and stop.is_set():
+                    raise QueueCancelled("已取消加入队列。")
                 source = item["source"].strip()
                 url = item["url"].strip()
                 if not source or not url:
@@ -233,6 +241,8 @@ class QueueStore:
                     SELECT * FROM tasks WHERE source = ? AND url = ? AND batch_key = ? AND position = ?
                 """, (source, url, batch_key, position)).fetchone()
                 result.append(_task(row))
+            if stop is not None and stop.is_set():
+                raise QueueCancelled("已取消加入队列。")
         return result
 
     def list_tasks(self):
@@ -242,6 +252,19 @@ class QueueStore:
     def get(self, task_id):
         with closing(self._connect()) as db:
             return self._get(db, task_id)
+
+    def get_many(self, task_ids):
+        """Read current tasks in requested order without exceeding SQLite's bind limit."""
+        requested = list(task_ids)
+        identifiers = list(dict.fromkeys(requested))
+        tasks = {}
+        with closing(self._connect()) as db:
+            for start in range(0, len(identifiers), 400):
+                chunk = identifiers[start:start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                tasks.update((row["id"], _task(row)) for row in db.execute(
+                    f"SELECT * FROM tasks WHERE id IN ({placeholders})", chunk))
+        return [tasks[task_id] for task_id in requested if task_id in tasks]
 
     def prepare(self, task_ids, options):
         """Capture options at first start and return existing tasks in the requested order."""

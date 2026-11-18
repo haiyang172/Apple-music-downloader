@@ -1894,7 +1894,20 @@ try:
         rows = [item(1), item(2)] if offset == 0 else [item(2), item(3)]
         return {"title": query, "rows": rows, "next_offset": 2 if offset == 0 else None}
 
-    with patch.object(youtube_download, "search_youtube", side_effect=search):
+    class SearchBrowserFixture:
+        def __init__(self, value, *, search=False):
+            assert value == "游戏原声" and search
+            self.offset = 0
+
+        def page(self, *, stop=None, limit=50):
+            result = search("游戏原声", stop=stop, offset=self.offset)
+            self.offset = result.get("next_offset")
+            return result
+
+        def close(self):
+            pass
+
+    with patch.object(video_links_ui, "YoutubeBrowser", SearchBrowserFixture):
         page.load_link("游戏原声")
         page.read_button.invoke()
         wait_for(window, lambda: not page.busy and len(page.rows) == 2)
@@ -1921,6 +1934,150 @@ try:
 finally:
     app.close()
 print("YouTube search, scroll continuation, retry, selected download, and original link passed.")
+
+from youtube_browse_worker import _Paginator
+
+
+def playlist_item(index):
+    return {"id": f"{index % 300:011d}", "title": f"位置 {index + 1}", "channel": "Fixture channel",
+            "ie_key": "Youtube", "playlist_index": index + 1}
+
+
+reads = []
+
+
+def raw_playlist():
+    for index in range(1005):
+        reads.append(index)
+        yield dict(playlist_item(index), availability="private" if index % 17 == 0 else None)
+
+
+paginator = _Paginator({"_type": "playlist", "id": "PLfixture", "title": "完整测试播放列表", "entries": raw_playlist(),
+                        "playlist_count": 1005}, search=False, identifier="PLfixture", fallback="Fixture")
+assert not reads
+first = paginator.page(50)
+assert len(reads) == 51 and first["cursor"] == 50 and first["more"]
+available = list(first["result"]["rows"])
+while not paginator.finished:
+    available.extend(paginator.page(50)["result"]["rows"])
+assert len(reads) == 1005 and paginator.total == 1005
+assert [row["position"] for row in available] == [index + 1 for index in range(1005) if index % 17]
+assert len({row["url"] for row in available}) < len(available)
+blank = _Paginator({"_type": "playlist", "id": "PLfixture", "entries": iter([
+    dict(playlist_item(index), availability="private" if index < 50 else None) for index in range(100)
+])}, search=False, identifier="PLfixture", fallback="Fixture")
+empty_page = blank.page(50)
+assert not empty_page["result"]["rows"] and empty_page["cursor"] == 50 and empty_page["more"]
+assert len(blank.page(50)["result"]["rows"]) == 50
+
+window, app = new_window()
+try:
+    page = app.video_link_pages["youtube"]
+    app.show("youtube")
+    source_url = "https://www.youtube.com/playlist?list=PLfixture"
+    behavior = {"fail": False, "pause": False}
+    entered = threading.Event()
+
+    class PlaylistBrowserFixture:
+        instances = []
+
+        def __init__(self, value, *, search=False):
+            assert value == source_url and not search
+            self.cursor = 0
+            self.calls = []
+            self.closed = False
+            self.fail = behavior["fail"]
+            self.pause = behavior["pause"]
+            self.instances.append(self)
+
+        def page(self, *, stop=None, limit=50):
+            self.calls.append(self.cursor)
+            if self.cursor == 50 and self.fail:
+                self.fail = False
+                raise RuntimeError("临时播放列表网络错误")
+            if self.cursor == 50 and self.pause:
+                self.pause = False
+                entered.set()
+                assert stop.wait(10), "Stopping the playlist did not reach its reader"
+                raise RuntimeError("已停止测试列表")
+            end = min(1005, self.cursor + limit)
+            rows = [youtube_download._row(playlist_item(index), f"{index % 300:011d}", index + 1, 1005,
+                                          "youtube:PLfixture", "完整测试播放列表")
+                    for index in range(self.cursor, end)]
+            self.cursor = end
+            return {"source": "youtube", "title": "完整测试播放列表", "rows": rows, "total": 1005,
+                    "next_offset": end if end < 1005 else None}
+
+        def close(self):
+            self.closed = True
+
+    def start_playlist():
+        page.load_link(source_url)
+        page.read_button.invoke()
+        wait_for(window, lambda: not page.busy and len(page.rows) == 50)
+        assert not page.tree.selection() and page.download_button.cget("text") == "下载全部"
+        return PlaylistBrowserFixture.instances[-1]
+
+    with patch.object(video_links_ui, "YoutubeBrowser", PlaylistBrowserFixture):
+        behavior["fail"] = True
+        failed_reader = start_playlist()
+        with patch.object(app, "enqueue_tasks_async") as enqueue:
+            page.queue_button.invoke()
+            wait_for(window, lambda: not page.busy)
+            enqueue.assert_not_called()
+            assert len(page.rows) == 50 and "尚未加入队列" in page.status.get()
+            assert page.retry_button.cget("text") == "重试整个列表"
+
+            def accept_retry(rows, begin, *, stop, on_done):
+                queued = list(rows)
+                assert len(queued) == 1005 and not begin
+                on_done(len(queued), "", False)
+                return True
+
+            enqueue.side_effect = accept_retry
+            page.retry_button.invoke()
+            wait_for(window, lambda: not page.busy)
+            enqueue.assert_called_once()
+        behavior.update(fail=False, pause=True)
+        stopped_reader = start_playlist()
+        assert failed_reader.closed
+        with patch.object(app, "enqueue_tasks_async") as enqueue:
+            page.queue_button.invoke()
+            wait_for(window, entered.is_set)
+            page.read_button.invoke()
+            wait_for(window, lambda: not page.busy)
+            enqueue.assert_not_called()
+            assert len(page.rows) == 50
+        behavior["pause"] = False
+        reader = start_playlist()
+        assert stopped_reader.closed
+        acknowledged = reader.page(stop=threading.Event())
+        page.stop.set()
+        page.receive(page.serial, acknowledged, "", 50)
+        assert len(page.rows) == 100 and page.page_error and page.retry_button.cget("text") == "继续读取"
+        with patch.object(page.tree, "winfo_viewable", return_value=True):
+            page._fill_view()
+        assert reader.calls == [0, 50]
+        reader = start_playlist()
+        before = len(app.tasks)
+        page.queue_button.invoke()
+        wait_for(window, lambda: not page.busy and not app.queue_adding)
+        tasks = [item for item in app.queue_store.list_tasks() if item.batch_key == "youtube:PLfixture"]
+        assert len(tasks) == 1005 and len(app.tasks) == before + 1005
+        assert [item.position for item in tasks] == list(range(1, 1006))
+        assert all(item.total == 1005 for item in tasks) and len({item.url for item in tasks}) == 300
+        assert reader.calls == list(range(0, 1005, 50))
+        assert len(page.rows) == 50 and page.pending_count == 955
+        with patch.object(page.tree, "winfo_viewable", return_value=True):
+            page._scroll_changed("0.5", "0.96")
+        wait_for(window, lambda: not page.busy and len(page.rows) == 100)
+        assert len(reader.calls) == 21 and page.pending_count == 905
+    with patch("youtube_browse.YoutubeBrowser", PlaylistBrowserFixture):
+        result = youtube_download.resolve_youtube(source_url)
+        assert len(result["rows"]) == 1005 and result["rows"][-1]["position"] == result["total"] == 1005
+finally:
+    app.close()
+print("YouTube lazy reads passed 1005 positions; whole-list queue retained repeats, cancelled/failed lists queued nothing, and cached pages scrolled without rereading.")
 
 from share_links import links_in_text
 from short_music_links import short_music_source
