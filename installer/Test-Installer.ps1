@@ -1349,6 +1349,78 @@ try:
     assert tags["TIT2"].text == ["QQ Fixture"] and tags["TPE1"].text == ["Artist"]
     front_cover, = tags.getall("APIC")
     assert front_cover.mime == "image/png" and front_cover.data == artwork.read_bytes()
+    import qq_download
+    safe_fields = {"source", "requested", "selected", "label", "codec", "bitrate", "size", "duration"}
+    with patch.object(qq_download, "_track_info", return_value=("00000000000001", 90, {"size_flac": 30_000_000})), \
+         patch.object(qq_download, "_media_location", return_value="https://isure.stream.qqmusic.qq.com/fixture?key=do-not-return"), \
+         patch.object(qq_download, "_copy_media", side_effect=AssertionError("Preflight must not transfer audio")), \
+         patch.object(qq_download, "_check_duration", side_effect=AssertionError("Preflight must not decode audio")):
+        declaration = qq_download.probe_qq(qq_song, threading.Event(), lambda _: None,
+                                           session=qq_session, expected_duration=90)
+        assert set(declaration) == safe_fields and declaration["codec"] == "FLAC" and declaration["size"] == 30_000_000
+        assert "do-not-return" not in str(declaration) and "https://" not in str(declaration)
+    preview_preferences = app.snapshot()
+    preview_started, preview_release = threading.Event(), threading.Event()
+
+    def preview_qq(url, stop, on_status, *, session, expected_duration, source_quality):
+        assert url == qq_song and session == qq_session and expected_duration == 90
+        if source_quality == "auto":
+            preview_started.set()
+            assert preview_release.wait(5)
+            codec, size, label = "MP3", 1_000_000, "旧的 MP3 规格"
+        else:
+            assert source_quality == "flac"
+            codec, size, label = "FLAC", 30_000_000, "FLAC"
+        return {"source": "qq", "requested": source_quality, "selected": source_quality,
+                "label": label, "codec": codec, "bitrate": None, "size": size, "duration": 90}
+
+    try:
+        with patch.object(qq_download, "probe_qq", side_effect=preview_qq):
+            browser.preview_button.invoke()
+            wait_for(window, preview_started.is_set)
+            preview = app.music_preflight_dialog
+            assert preview.row["position"] == qq_task.position and preview.row["batch_key"] == qq_task.batch_key
+            preview.quality_box.set(Studio.MUSIC_SOURCE_QUALITIES["qq"]["flac"])
+            preview.changed()
+            wait_for(window, lambda: preview.info is not None and preview.info["requested"] == "flac")
+            preview_release.set()
+            preview.output_box.set(Studio.audio.OUTPUTS["mp3"])
+            preview.bitrate_box.set("192")
+            preview.update_output()
+            assert preview.info["codec"] == "FLAC" and "2.1 MiB" in preview.output_size.get()
+            assert preview.target.get().endswith("Artist - QQ Fixture.mp3")
+            preview.queue_button.invoke()
+            assert preview.closed and app.music_preflight_dialog is None
+            alternative, = [task for task in app.queue_store.list_tasks()
+                            if task.source == "qq" and task.title == "QQ Fixture" and task.id != qq_task.id]
+            assert alternative.options["qq_quality"] == "flac" and alternative.options["output"] == "mp3"
+            assert alternative.options["mp3_bitrate"] == 192 and alternative.position == qq_task.position
+            assert alternative.batch_key.startswith(qq_task.batch_key + ":format:")
+            original = app.queue_store.get(qq_task.id)
+            assert original.state == "complete" and original.files == qq_task.files and original.options == qq_task.options
+            before_count = len(app.tasks)
+            browser.preview_button.invoke()
+            wait_for(window, lambda: app.music_preflight_dialog is not None
+                     and app.music_preflight_dialog.info is not None)
+            app.music_preflight_dialog.queue_button.invoke()
+            assert len(app.tasks) == before_count
+            browser.preview_button.invoke()
+            wait_for(window, lambda: app.music_preflight_dialog is not None
+                     and app.music_preflight_dialog.info is not None)
+            preview = app.music_preflight_dialog
+            account.session = None
+            wait_for(window, lambda: preview.closed)
+            assert preview.stop.is_set() and app.music_preflight_dialog is None
+            account.session = qq_session
+    finally:
+        preview_release.set()
+        if app.music_preflight_dialog is not None:
+            app.music_preflight_dialog.close()
+        app.source_quality_labels["qq"].set(Studio.MUSIC_SOURCE_QUALITIES["qq"][preview_preferences["qq_quality"]])
+        app.output_label.set(Studio.audio.OUTPUTS[preview_preferences["output"]])
+        app.fields["mp3_bitrate"].set(str(preview_preferences["mp3_bitrate"]))
+        app.store(preview_preferences)
+    print("Music preflight ignored stale declarations, saved explicit formats, retained existing task history and closed on account change.")
     app.fields["music_sidecars"].set(False)
     account.logout()
     assert not browser.rows and account.session is None and account.auth.load() is None
@@ -1385,6 +1457,16 @@ try:
 
     netease_account = netease.account
     netease_session = NeteaseSession(12345, (("MUSIC_U", "isolated-fixture-netease-cookie"),))
+    import netease_download
+    with patch.object(netease_download, "_quality_source", return_value=(
+            "https://m1.music.126.net/fixture.flac?key=do-not-return", 90, 30_000_000, "a" * 32,
+            "flac", "lossless", 1_200_000)), \
+         patch.object(netease_download, "_copy_media", side_effect=AssertionError("Preflight must not transfer audio")), \
+         patch.object(netease_download, "_check_duration", side_effect=AssertionError("Preflight must not decode audio")):
+        declaration = netease_download.probe_netease(netease_song, threading.Event(), lambda _: None,
+                                                    session=netease_session, expected_duration=90)
+        assert set(declaration) == safe_fields and declaration["codec"] == "FLAC" and declaration["size"] == 30_000_000
+        assert "do-not-return" not in str(declaration) and "https://" not in str(declaration)
     netease_qr = SimpleNamespace(url="https://music.163.com/login?codekey=fixture")
     my_netease_playlist = {"id": "1234", "title": "网易云测试歌单", "kind": "liked", "total": 1, "url": "",
                           "private": True, "_account_id": netease_session.user_id}

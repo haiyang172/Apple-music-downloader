@@ -147,9 +147,8 @@ class SharedMusicBrowser:
             self.queue_all_button.pack(side="right", padx=(0, 6))
             self.queue_button = app.action(downloads, "所选入队", lambda: self._enqueue(False))
             self.queue_button.pack(side="right", padx=(0, 6))
-            if source == "netease":
-                ttk.Label(downloads, text="原始 MP3", style="MusicStatus.TLabel", width=1).pack(
-                    side="left", fill="x", expand=True, padx=(3, 6))
+            self.preview_button = app.action(downloads, "下载预览", self.preview_download)
+            self.preview_button.pack(side="left", padx=(3, 6))
 
         headings = {"position": "序号", "title": "歌曲", "artist": "艺人", "duration": "时长"}
         self.tree = ttk.Treeview(card, columns=tuple(headings), show="headings",
@@ -634,6 +633,31 @@ class SharedMusicBrowser:
             self.download_button.configure(state="normal" if selected else "disabled")
             self.queue_button.configure(state="normal" if selected else "disabled")
             self.queue_all_button.configure(state="normal" if self.rows and can_enqueue and self.view != "search" else "disabled")
+            self.preview_button.configure(state="normal" if selected and len(self.tree.selection()) == 1
+                                          and not library else "disabled")
+
+    def preview_download(self):
+        selected = self.tree.selection()
+        if self.app.closing or self._opening or self.batch_busy or self.view == "library" or len(selected) != 1:
+            return
+        item = self.rows.get(selected[0])
+        if item is None:
+            return
+        try:
+            row, = self._queued_rows([dict(item)])
+        except ValueError as error:
+            self.status.set(str(error))
+            return
+        self.app.show_music_preflight(self, row)
+
+    def _queued_rows(self, items):
+        collection_key = ""
+        if self.private_view and self.private_playlist is not None:
+            owner = self._queue_owner(self.account.session)
+            collection_key = shared_music.private_collection_key(self.source, owner, self.private_playlist)
+        return list(shared_music.queue_rows(self.source, items, collection_url=self.collection_url,
+                                           batch_title=self.caption.get(), total=self.total, private=self.private_view,
+                                           collection_key=collection_key))
 
     def _enqueue(self, begin, *, all_rows=False):
         if self.source != self.page_source or not self.source or self._opening or self.batch_busy or self.app.closing:
@@ -645,17 +669,11 @@ class SharedMusicBrowser:
         if self.view == "library":
             self._resolve_playlists(items, begin)
             return
-        collection_key = ""
-        if self.private_view and self.private_playlist is not None:
-            owner = self._queue_owner(self.account.session)
-            try:
-                collection_key = shared_music.private_collection_key(self.source, owner, self.private_playlist)
-            except ValueError as error:
-                self.status.set(str(error))
-                return
-        rows = list(shared_music.queue_rows(self.source, items, collection_url=self.collection_url,
-                                            batch_title=self.caption.get(), total=self.total, private=self.private_view,
-                                            collection_key=collection_key))
+        try:
+            rows = self._queued_rows(items)
+        except ValueError as error:
+            self.status.set(str(error))
+            return
         if rows:
             count = self.app.enqueue_tasks(rows, begin)
             if count and not begin:

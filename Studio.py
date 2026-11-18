@@ -45,6 +45,7 @@ from local_convert_ui import FORMATS as LOCAL_FORMATS, LocalConverter
 from login_service import LoginService
 from music_browser import MusicBrowser, TreeSort, prepare_preview
 from music_catalog import CatalogClient
+from music_preflight_ui import MusicPreflight
 from netease_auth import NeteaseAuth
 from playlist_export import save_m3u8
 from qq_auth import QqAuth
@@ -172,6 +173,7 @@ class Studio:
         self.service_busy = False
         self.auth_busy = False
         self.web_login_busy = False
+        self.music_preflight_dialog = None
         self.web_profile_clearing = False
         self.web_profile_stop = threading.Event()
         self.connect_after_web_clear = False
@@ -1422,6 +1424,13 @@ class Studio:
             elif not self.preferences.get("native_account") and not self.preferences.get("session"):
                 self.user_entry.focus_set()
 
+    def show_music_preflight(self, owner, row):
+        if self.closing:
+            return
+        if self.music_preflight_dialog is not None:
+            self.music_preflight_dialog.close()
+        self.music_preflight_dialog = MusicPreflight(self, owner, row, MUSIC_SOURCE_QUALITIES[owner.page_source])
+
     def open_platform_account(self):
         source = self.profile_source
         account = self.qr_accounts.get(source)
@@ -2021,6 +2030,8 @@ class Studio:
             self.finish_close()
             return
         self.closing = True
+        if self.music_preflight_dialog is not None:
+            self.music_preflight_dialog.close()
         self.queue_add_stop.set()
         if self.queue_add_render_timer is not None:
             self.window.after_cancel(self.queue_add_render_timer)

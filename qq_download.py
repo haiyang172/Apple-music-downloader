@@ -256,8 +256,7 @@ def _check_duration(path, ffmpeg, stop, expected, source_quality="128"):
     return details
 
 
-def download_qq(url, stage, ffmpeg, stop, on_status, *, session, expected_duration=None, source_quality="128"):
-    """Stage a full native track; only auto may try a lower available source tier."""
+def _resolve_source(url, stop, on_status, *, session, expected_duration, source_quality):
     if not isinstance(source_quality, str) or source_quality not in ("auto", *_QUALITIES):
         raise ValueError("请选择自动、MP3 128、MP3 320 或 FLAC 源音质。")
     provider, kind, mid, _ = _parse_link(url)
@@ -286,6 +285,22 @@ def download_qq(url, stage, ffmpeg, stop, on_status, *, session, expected_durati
                 raise
             on_status(f"QQ 音乐 {quality.label} 暂不可用，正在尝试下一档源音质…")
     _check_stop(stop)
+    return requested, selected, quality, size, duration, location
+
+
+def probe_qq(url, stop, on_status, *, session, expected_duration=None, source_quality="auto"):
+    """Read offered source metadata without transferring media or retaining its locator."""
+    _, selected, quality, size, duration, _ = _resolve_source(
+        url, stop, on_status, session=session, expected_duration=expected_duration, source_quality=source_quality)
+    return {"source": "qq", "requested": source_quality, "selected": selected, "label": quality.label,
+            "codec": "FLAC" if quality.suffix == ".flac" else "MP3", "bitrate": quality.bitrate,
+            "size": size, "duration": duration}
+
+
+def download_qq(url, stage, ffmpeg, stop, on_status, *, session, expected_duration=None, source_quality="128"):
+    """Stage a full native track; only auto may try a lower available source tier."""
+    requested, selected, quality, size, duration, location = _resolve_source(
+        url, stop, on_status, session=session, expected_duration=expected_duration, source_quality=source_quality)
     target = Path(stage) / ("qq" + quality.suffix)
     created = False
     try:
