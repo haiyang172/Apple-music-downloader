@@ -198,6 +198,8 @@ class Studio:
         self.profile_connected = False
         self.path_summary = tk.StringVar(window)
         self.status = tk.StringVar(window, load_error or (f"已恢复 {recovered} 项中断任务" if recovered else "就绪"))
+        if self.queue_store.migration_backup is not None and not load_error:
+            self.status.set("队列已升级，旧记录已备份" + (f" · 已恢复 {recovered} 项中断任务" if recovered else ""))
         self.engine_status = tk.StringVar(window)
         self.service_status = tk.StringVar(window, "按下载音质启动")
         self.token = tk.StringVar(window)
@@ -1210,6 +1212,18 @@ class Studio:
         buttons.grid(row=5, column=0, columnspan=3, sticky="w")
         self.action(buttons, "保存设置", self.save_preferences, primary=True).pack(side="left")
         self.action(buttons, "启动服务", self.start_service).pack(side="left", padx=7)
+        self.action(buttons, "队列备份", self.open_queue_backups).pack(side="left")
+
+    def open_queue_backups(self):
+        directory = settings.DATA / "backups"
+        try:
+            if directory.is_dir():
+                os.startfile(directory)
+            else:
+                messagebox.showinfo(APP_TITLE, "暂无队列升级备份。旧版本记录需要升级时，会先自动保存一份完整副本。",
+                                    parent=self.window)
+        except OSError as error:
+            self.error("无法打开队列备份", error)
 
     def show(self, page):
         if page != self.active_page:

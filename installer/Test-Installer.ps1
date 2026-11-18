@@ -143,6 +143,134 @@ finally:
     service.close()
 print("Bundled login service started without fetching a component or accessing an account.")
 
+import json
+import sqlite3
+from contextlib import closing
+import download_queue
+
+
+def legacy_queue(path, mode="WAL"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=" + mode)
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    connection.execute("""CREATE TABLE tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, url TEXT NOT NULL,
+        title TEXT NOT NULL, artist TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+        batch_key TEXT NOT NULL, batch_title TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+        total INTEGER, options TEXT, error TEXT NOT NULL DEFAULT '', files TEXT NOT NULL DEFAULT '[]',
+        UNIQUE(source, url, batch_key, position))""")
+    connection.commit()
+    options = json.dumps({"folder": "H:/音乐", "output": "original", "mp3_bitrate": 320}, ensure_ascii=False)
+    for position, state in enumerate(sorted(download_queue.STATES), 1):
+        connection.execute("""INSERT INTO tasks
+            (source, url, title, artist, state, batch_key, batch_title, position, total, options, error, files)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("qq", f"https://y.qq.com/n/ryqq_v2/songDetail/{position:014}", f"中文曲目 {position}", "歌手",
+             state, "playlist-fixture", "同名歌单", position, 6, options, "旧错误记录",
+             json.dumps([f"H:/音乐/曲目 {position}.mp3"], ensure_ascii=False)))
+    connection.commit()
+    return connection
+
+
+for journal_mode in ("DELETE", "WAL"):
+    legacy_path = profile / ("old-queue-" + journal_mode) / "downloads.sqlite3"
+    with closing(legacy_queue(legacy_path, journal_mode)) as old:
+        old_rows = old.execute("SELECT * FROM tasks ORDER BY id").fetchall()
+        old_schema = old.execute("PRAGMA table_info(tasks)").fetchall()
+        if journal_mode == "WAL":
+            assert Path(str(legacy_path) + "-wal").stat().st_size > 0
+        migrated = download_queue.QueueStore(legacy_path)
+        backup_path = migrated.migration_backup
+        assert backup_path and backup_path.parent == legacy_path.parent / "backups"
+        with closing(sqlite3.connect(backup_path)) as backup:
+            assert backup.execute("SELECT * FROM tasks ORDER BY id").fetchall() == old_rows
+            assert backup.execute("PRAGMA table_info(tasks)").fetchall() == old_schema
+            assert backup.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+        restored_tasks = migrated.list_tasks()
+        assert len(restored_tasks) == 6 and {item.state for item in restored_tasks} == download_queue.STATES
+        assert [item.position for item in restored_tasks] == list(range(1, 7))
+        assert all(item.options == json.loads(old_rows[0][10]) and item.error == "旧错误记录"
+                   and item.audio_details == () for item in restored_tasks)
+        assert migrated.recover() == 1
+        assert migrated.get(next(item.id for item in restored_tasks if item.state == "running")).state == "interrupted"
+        assert download_queue.QueueStore(legacy_path).migration_backup is None
+        assert list(backup_path.parent.iterdir()) == [backup_path]
+
+failure_path = profile / "old-queue-backup-failure" / "downloads.sqlite3"
+with closing(legacy_queue(failure_path)) as old:
+    before = old.execute("SELECT * FROM tasks ORDER BY id").fetchall()
+    schema_before = old.execute("PRAGMA table_info(tasks)").fetchall()
+    with patch.object(download_queue, "_backup_before_migration", side_effect=OSError("模拟备份磁盘已满")):
+        try:
+            download_queue.QueueStore(failure_path)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("An unavailable backup must stop schema changes")
+    assert old.execute("SELECT * FROM tasks ORDER BY id").fetchall() == before
+    assert old.execute("PRAGMA table_info(tasks)").fetchall() == schema_before
+
+rollback_path = profile / "old-queue-migration-rollback" / "downloads.sqlite3"
+with closing(legacy_queue(rollback_path)) as old:
+    before = old.execute("SELECT * FROM tasks ORDER BY id").fetchall()
+    schema_before = old.execute("PRAGMA table_info(tasks)").fetchall()
+    original_connect = download_queue.QueueStore._connect
+
+    def fail_second_alter(store):
+        connection = original_connect(store)
+        alterations = 0
+
+        def authorize(action, _first, _second, _database, _trigger):
+            nonlocal alterations
+            if action == sqlite3.SQLITE_ALTER_TABLE:
+                alterations += 1
+                if alterations == 2:
+                    return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorize)
+        return connection
+
+    with patch.object(download_queue.QueueStore, "_connect", fail_second_alter):
+        try:
+            download_queue.QueueStore(rollback_path)
+        except sqlite3.DatabaseError:
+            pass
+        else:
+            raise AssertionError("The injected second migration failure did not occur")
+    assert old.execute("SELECT * FROM tasks ORDER BY id").fetchall() == before
+    assert old.execute("PRAGMA table_info(tasks)").fetchall() == schema_before
+    preserved_backup, = (rollback_path.parent / "backups").glob("*.sqlite3")
+    with closing(sqlite3.connect(preserved_backup)) as backup:
+        assert backup.execute("SELECT * FROM tasks ORDER BY id").fetchall() == before
+    retried = download_queue.QueueStore(rollback_path)
+    assert retried.migration_backup != preserved_backup and preserved_backup.is_file()
+    assert not list(preserved_backup.parent.glob("*.tmp"))
+
+fresh_path = profile / "new-queue" / "downloads.sqlite3"
+assert download_queue.QueueStore(fresh_path).migration_backup is None
+assert not (fresh_path.parent / "backups").exists()
+from concurrent.futures import ThreadPoolExecutor
+
+for mode in ("DELETE", "WAL"):
+    concurrent_path = profile / ("concurrent-upgrade-" + mode) / "downloads.sqlite3"
+    with closing(legacy_queue(concurrent_path, mode)):
+        pass
+    ready = threading.Barrier(2)
+
+    def concurrent_open():
+        ready.wait(timeout=5)
+        return download_queue.QueueStore(concurrent_path)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        opened = [workers.submit(concurrent_open) for _ in range(2)]
+        stores = [future.result(timeout=15) for future in opened]
+    assert sum(store.migration_backup is not None for store in stores) == 1
+    assert len(list((concurrent_path.parent / "backups").glob("*.sqlite3"))) == 1
+    assert all(len(store.list_tasks()) == 6 for store in stores)
+print("Old queue backups included committed WAL data, retained states and settings, stopped on backup failure and rolled back failed migrations.")
+
 class TestCatalog:
     def tracks(self, item, region):
         assert (item["type"], item["id"], region) == ("playlist", "pl.test", "au")

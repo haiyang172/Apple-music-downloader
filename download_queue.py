@@ -2,13 +2,66 @@
 
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+from tempfile import NamedTemporaryFile
+import time
 from uuid import uuid4
+
+from storage import _plain_directory
 
 
 STATES = frozenset({"pending", "running", "complete", "failed", "interrupted", "cancelled"})
+
+
+def _enable_wal(connection):
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as error:
+            code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+            if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.025)
+
+
+def _backup_before_migration(path):
+    """Keep a consistent committed snapshot while the caller holds its writer lock."""
+    directory = path.parent / "backups"
+    directory.mkdir(exist_ok=True)
+    try:
+        _plain_directory(directory)
+    except ValueError:
+        raise OSError("队列备份目录必须是普通目录，已停止升级。") from None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = directory / f"{path.stem}-before-upgrade-{stamp}-{uuid4().hex}.sqlite3"
+    scratch = None
+    try:
+        with NamedTemporaryFile(prefix="queue-backup-", suffix=".tmp", dir=directory, delete=False) as temporary:
+            scratch = Path(temporary.name)
+        # Backing up the connection with BEGIN IMMEDIATE would wait on its own
+        # write transaction. A separate read connection includes committed WAL
+        # frames while the caller's lock prevents a writer changing that snapshot.
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)) as source, \
+                closing(sqlite3.connect(scratch, timeout=10)) as backup:
+            deadline = time.monotonic() + 30
+
+            def progress(_status, _remaining, _total):
+                if time.monotonic() > deadline:
+                    raise sqlite3.OperationalError("队列升级备份超时，请关闭其他影音下载台窗口后重试。")
+
+            source.backup(backup, pages=256, progress=progress, sleep=0.025)
+            if backup.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise sqlite3.DatabaseError("队列备份未通过完整性检查，已停止升级。")
+        scratch.rename(destination)
+        return destination
+    finally:
+        if scratch is not None:
+            scratch.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -75,9 +128,10 @@ def _options_json(options):
 class QueueStore:
     def __init__(self, path):
         self.path = Path(path)
+        self.migration_backup = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db, db:
-            db.execute("PRAGMA journal_mode = WAL")
+            _enable_wal(db)
             db.execute("BEGIN IMMEDIATE")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -105,6 +159,9 @@ class QueueStore:
                 )
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
+            if not {"audio_title", "audio_details", "duration", "song_edited", "uploader", "source_category",
+                    "media_category"}.issubset(columns):
+                self.migration_backup = _backup_before_migration(self.path)
             if "audio_title" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN audio_title TEXT")
             if "audio_details" not in columns:
