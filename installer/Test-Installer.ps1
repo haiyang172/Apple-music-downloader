@@ -124,7 +124,8 @@ assert mutagen.File(audio).info.length > 0
 for suffix, codec in (("flac", "flac"), ("mp3", "libmp3lame")):
     converted = profile / f"local-test.{suffix}"
     subprocess.run(
-        [str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(audio), "-c:a", codec, str(converted)],
+        [str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(audio), "-c:a", codec,
+         *(["-b:a", "128k"] if suffix == "mp3" else []), str(converted)],
         check=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     assert mutagen.File(converted).info.length > 0
@@ -1189,8 +1190,9 @@ try:
         browser._open_selected()
         wait_for(window, lambda: browser.view == "tracks" and len(browser.rows) == 1 and not browser.busy)
 
-    def qq_fixture(url, stage, ffmpeg, stop, on_status, *, session, expected_duration=None):
+    def qq_fixture(url, stage, ffmpeg, stop, on_status, *, session, expected_duration=None, source_quality=None):
         assert url == qq_song and session == qq_session and expected_duration == 90
+        assert source_quality == "auto"
         return Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))
 
     def music_cover(url, stage, stop, on_status, *, session=None):
@@ -1204,6 +1206,7 @@ try:
     app.fields["folder"].set(str(profile))
     app.fields["category"].set("")
     app.fields["music_sidecars"].set(True)
+    app.output_label.set(Studio.audio.OUTPUTS["original"])
     with patch.object(apple_download, "download_qq", side_effect=qq_fixture), \
          patch.object(apple_download.qq_sidecars, "save_cover", side_effect=music_cover), \
          patch.object(apple_download.qq_sidecars, "save_lyrics", side_effect=music_lyrics):
@@ -1234,13 +1237,15 @@ try:
 
     app.fields["folder"].set(str(profile))
     app.fields["category"].set("")
+    app.output_label.set(Studio.audio.OUTPUTS["original"])
     netease = app.shared_music_browsers["netease"]
     netease._enqueue(False, all_rows=True)
     song, = [task for task in app.tasks.values() if task.source == "netease"]
     assert (song.url, song.position, song.total, song.duration) == (netease_song, 1, 5, 90)
 
-    def netease_fixture(url, stage, ffmpeg, stop, on_status, *, session=None, expected_duration=None):
+    def netease_fixture(url, stage, ffmpeg, stop, on_status, *, session=None, expected_duration=None, source_quality=None):
         assert url == netease_song and expected_duration == 90 and session is None
+        assert source_quality == "auto"
         return Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))
 
     with patch.object(apple_download, "download_netease", side_effect=netease_fixture):
@@ -1291,6 +1296,156 @@ try:
     app.fields["music_sidecars"].set(False)
     netease_account.logout()
     assert not netease.rows and netease_account.auth.load() is None
+
+    web_preferences = app.snapshot()
+    web_output = profile / "web-audio-outputs"
+    web_output.mkdir()
+    app.fields["folder"].set(str(web_output))
+    app.fields["music_sidecars"].set(True)
+    app.source_quality_boxes["qq"].set(Studio.MUSIC_SOURCE_QUALITIES["qq"]["128"])
+    app.source_quality_boxes["netease"].set(Studio.MUSIC_SOURCE_QUALITIES["netease"]["flac"])
+    app.music_output_box.set(Studio.audio.OUTPUTS["aac"])
+    app.music_bitrate_box.set("192")
+    app.quality_changed(None)
+    saved = settings.load()
+    assert (saved["qq_quality"], saved["netease_quality"], saved["output"], saved["mp3_bitrate"]) == (
+        "128", "flac", "aac", 192,
+    )
+    mp3_details = Studio.audio.audio_details(profile / "local-test.mp3")
+    flac_details = Studio.audio.audio_details(profile / "local-test.flac")
+    assert mp3_details["codec"] == "MP3" and abs(mp3_details["bitrate"] - 128_000) < 4000
+    mp3_duration = mutagen.File(profile / "local-test.mp3").info.length
+    flac_duration = mutagen.File(profile / "local-test.flac").info.length
+
+    def qq_aac_fixture(url, stage, ffmpeg, stop, on_status, *, session, expected_duration, source_quality):
+        assert url == qq_song and session == qq_session
+        assert expected_duration == mp3_duration and source_quality == "128"
+        return Path(shutil.copyfile(profile / "local-test.mp3", stage / "native.mp3"))
+
+    app.shared_music_browsers["qq"].account.session = qq_session
+    with patch.object(apple_download, "download_qq", side_effect=qq_aac_fixture) as qq_aac_download, \
+         patch.object(apple_download.qq_sidecars, "save_cover", side_effect=music_cover), \
+         patch.object(apple_download.qq_sidecars, "save_lyrics", side_effect=music_lyrics):
+        assert app.enqueue_tasks([{"source": "qq", "url": qq_song, "title": "QQ AAC Fixture", "artist": "Artist",
+                                  "duration": mp3_duration, "batch_key": "web-audio-qq-aac"}], True) == 1
+        wait_for(window, lambda: not app.busy)
+        qq_aac_download.assert_called_once()
+    aac_task, = [task for task in app.queue_store.list_tasks() if task.title == "QQ AAC Fixture"]
+    assert aac_task.state == "complete", aac_task.error
+    assert aac_task.options["qq_quality"] == "128" and aac_task.options["output"] == "aac"
+    m4a, artwork, lyrics = map(Path, aac_task.files)
+    assert m4a.name == "Artist - QQ AAC Fixture.m4a" and m4a.parent == web_output
+    assert artwork == m4a.with_suffix(".png") and lyrics == m4a.with_suffix(".lrc")
+    tags = mutagen.File(m4a).tags
+    assert tags["\xa9nam"] == ["QQ AAC Fixture"] and tags["\xa9ART"] == ["Artist"]
+    assert bytes(tags["covr"][0]) == artwork.read_bytes() and tags["covr"][0].imageformat == 14
+    assert tags["\xa9lyr"] == [lyrics.read_text(encoding="utf-8")]
+    measured, = aac_task.audio_details
+    assert measured["source"] == mp3_details and measured["output"] == Studio.audio.audio_details(m4a)
+    assert measured["output"]["codec"] == "AAC-LC" and measured["output"]["bitrate"] > 0
+
+    app.music_output_box.set(Studio.audio.OUTPUTS["mp3"])
+    app.quality_changed(None)
+    entered_native_download = threading.Event()
+
+    def pause_netease_flac(url, stage, ffmpeg, stop, on_status, *, session, expected_duration, source_quality):
+        assert url == netease_song and session is None
+        assert expected_duration == flac_duration and source_quality == "flac"
+        entered_native_download.set()
+        assert stop.wait(10), "The normal pause action did not reach the downloader"
+        raise apple_download.Cancelled()
+
+    with patch.object(apple_download, "download_netease", side_effect=pause_netease_flac):
+        assert app.enqueue_tasks([{"source": "netease", "url": netease_song, "title": "NetEase FLAC Fixture",
+                                  "artist": "Artist", "duration": flac_duration,
+                                  "batch_key": "web-audio-netease-mp3"}], True) == 1
+        wait_for(window, entered_native_download.is_set)
+        app.pause()
+        wait_for(window, lambda: not app.busy)
+    flac_task, = [task for task in app.queue_store.list_tasks() if task.title == "NetEase FLAC Fixture"]
+    assert flac_task.state == "interrupted" and not flac_task.files
+    captured_options = dict(flac_task.options)
+    assert (captured_options["netease_quality"], captured_options["output"], captured_options["mp3_bitrate"]) == (
+        "flac", "mp3", 192,
+    )
+    app.source_quality_boxes["netease"].set(Studio.MUSIC_SOURCE_QUALITIES["netease"]["128"])
+    app.music_output_box.set(Studio.audio.OUTPUTS["original"])
+    app.music_bitrate_box.set("320")
+    app.quality_changed(None)
+    app.close()
+    window, app = new_window()
+    assert app.source_quality_labels["qq"].get() == Studio.MUSIC_SOURCE_QUALITIES["qq"]["128"]
+    assert app.source_quality_labels["netease"].get() == Studio.MUSIC_SOURCE_QUALITIES["netease"]["128"]
+    assert app.snapshot()["output"] == "original" and app.snapshot()["mp3_bitrate"] == 320
+    assert app.queue_store.get(flac_task.id).options == captured_options
+    assert app.queue_store.get(aac_task.id).audio_details == aac_task.audio_details
+
+    def netease_flac_fixture(url, stage, ffmpeg, stop, on_status, *, session, expected_duration, source_quality):
+        assert url == netease_song and session is None
+        assert expected_duration == flac_duration and source_quality == "flac"
+        return Path(shutil.copyfile(profile / "local-test.flac", stage / "native.flac"))
+
+    with patch.object(apple_download, "download_netease", side_effect=netease_flac_fixture) as flac_download, \
+         patch.object(apple_download.netease_sidecars, "save_cover", side_effect=music_cover), \
+         patch.object(apple_download.netease_sidecars, "save_lyrics", side_effect=music_lyrics):
+        app.start_download([flac_task.id])
+        wait_for(window, lambda: not app.busy)
+        flac_download.assert_called_once()
+    flac_task = app.queue_store.get(flac_task.id)
+    assert flac_task.state == "complete" and flac_task.options == captured_options, flac_task.error
+    mp3, artwork, lyrics = map(Path, flac_task.files)
+    assert mp3.name == "Artist - NetEase FLAC Fixture.mp3" and mp3.parent == web_output
+    tags = mutagen.File(mp3).tags
+    assert tags["TIT2"].text == ["NetEase FLAC Fixture"] and tags["TPE1"].text == ["Artist"]
+    front_cover, = tags.getall("APIC")
+    embedded_lyrics, = tags.getall("USLT")
+    assert front_cover.data == artwork.read_bytes() and embedded_lyrics.text == lyrics.read_text(encoding="utf-8")
+    measured, = flac_task.audio_details
+    assert measured["source"] == flac_details and measured["source"]["codec"] == "FLAC"
+    assert measured["output"] == Studio.audio.audio_details(mp3) and measured["output"]["codec"] == "MP3"
+    assert abs(measured["output"]["bitrate"] - 192_000) < 6000
+    assert app.snapshot()["netease_quality"] == "128" and app.snapshot()["output"] == "original"
+
+    # Pre-.34 tasks omit source quality; the provider's original default must receive no new keyword.
+    legacy_options = {key: value for key, value in captured_options.items()
+                      if key not in ("qq_quality", "netease_quality")}
+    legacy_options.update(output="original", music_sidecars=False)
+    app.source_quality_boxes["qq"].set(Studio.MUSIC_SOURCE_QUALITIES["qq"]["flac"])
+    app.source_quality_boxes["netease"].set(Studio.MUSIC_SOURCE_QUALITIES["netease"]["hires"])
+    app.music_output_box.set(Studio.audio.OUTPUTS["aac"])
+    app.quality_changed(None)
+    app.shared_music_browsers["qq"].account.session = qq_session
+
+    def legacy_music_fixture(url, stage, ffmpeg, stop, on_status, *, session, expected_duration):
+        assert (url, session) in ((qq_song, qq_session), (netease_song, None))
+        assert expected_duration == mp3_duration
+        return Path(shutil.copyfile(profile / "local-test.mp3", stage / "legacy.mp3"))
+
+    with patch.object(apple_download, "download_qq", side_effect=legacy_music_fixture) as legacy_qq, \
+         patch.object(apple_download, "download_netease", side_effect=legacy_music_fixture) as legacy_netease:
+        assert app.enqueue_tasks([
+            {"source": source, "url": link, "title": f"Legacy {source} Fixture", "duration": mp3_duration,
+             "batch_key": "web-audio-legacy", "options": legacy_options}
+            for source, link in (("qq", qq_song), ("netease", netease_song))
+        ], True) == 2
+        wait_for(window, lambda: not app.busy)
+        for download in (legacy_qq, legacy_netease):
+            download.assert_called_once()
+            assert "source_quality" not in download.call_args.kwargs
+    for source in ("qq", "netease"):
+        legacy_task, = [task for task in app.queue_store.list_tasks() if task.title == f"Legacy {source} Fixture"]
+        assert legacy_task.state == "complete" and legacy_task.options == legacy_options, legacy_task.error
+        assert Path(legacy_task.files[0]).read_bytes() == (profile / "local-test.mp3").read_bytes()
+        measured, = legacy_task.audio_details
+        assert measured["source"] == measured["output"] == mp3_details
+    app.shared_music_browsers["qq"].account.session = None
+    for key in ("folder", "category", "music_sidecars", "mp3_bitrate"):
+        app.fields[key].set(web_preferences[key])
+    for source in ("qq", "netease"):
+        app.source_quality_labels[source].set(Studio.MUSIC_SOURCE_QUALITIES[source][web_preferences[f"{source}_quality"]])
+    app.output_label.set(Studio.audio.OUTPUTS[web_preferences["output"]])
+    app.save_preferences()
+    print("QQ/NetEase source quality, native-to-output encoding, tagged sidecars, saved restart settings, and legacy defaults passed.")
 
     youtube_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
     youtube_row = {"source": "youtube", "title": "YouTube Fixture", "artist": "Channel", "url": youtube_url}

@@ -20,7 +20,7 @@ from bili_resume import forget_resume
 from bili_sidecars import save_cover, save_danmaku, save_subtitle
 from engine import Cancelled
 from local_convert import convert_file
-from music_tagging import write_mp3_tags
+from music_tagging import write_music_tags
 import netease_sidecars
 from netease_download import download_netease
 from qq_download import download_qq
@@ -28,6 +28,7 @@ import qq_sidecars
 import settings
 from storage import clean_name, destination_for, download_cache, publish, volume_identity
 from youtube_download import download_youtube
+from web_audio import prepare_web_audio
 
 
 SOURCE = "apple_music"
@@ -97,6 +98,8 @@ def download_options(preferences):
             "bili_subtitle": preferences.get("bili_subtitle", False),
             "bili_archive": preferences.get("bili_archive", False),
             "music_sidecars": preferences.get("music_sidecars", False),
+            "qq_quality": preferences.get("qq_quality", "auto"),
+            "netease_quality": preferences.get("netease_quality", "auto"),
             "bili_auto_category": preferences.get("bili_auto_category", True),
             "bili_category_rules": 2,
             "youtube_mode": preferences.get("youtube_mode", "video"),
@@ -408,7 +411,8 @@ def _stage_music_sidecars(task, source, stage, stop, status, session):
     try:
         if not source.resolve(strict=True).is_relative_to(stage.resolve(strict=True)):
             raise ValueError("音频不在本次下载的暂存目录内。")
-        write_mp3_tags(source, task.title, task.artist, cover=cover)
+        lyrics = next((path for label, path in attachments if label == "歌词"), None)
+        write_music_tags(source, task.title, task.artist, cover=cover, lyrics=lyrics)
     except (MutagenError, OSError, ValueError) as error:
         errors.append(f"写入音频标签失败 · {error}")
     return attachments, errors
@@ -425,6 +429,7 @@ def _download_web(store, task, target, disk, engine, stop, post, session):
         stage = Path(working)
         name = task.title
         preserved = True
+        original = None
         attachments, errors = [], []
         if task.source == "youtube":
             mode = task.options.get("youtube_mode", "video")
@@ -432,16 +437,31 @@ def _download_web(store, task, target, disk, engine, stop, post, session):
             preserved = mode != "mp3"
         else:
             download = download_qq if task.source == "qq" else download_netease
-            source = download(task.url, stage, engine.ffmpeg, stop, status, session=session,
-                              expected_duration=task.duration)
+            quality_key = f"{task.source}_quality"
+            download_kwargs = {"session": session, "expected_duration": task.duration}
+            if quality_key in task.options:
+                download_kwargs["source_quality"] = task.options[quality_key]
+            source = download(task.url, stage, engine.ffmpeg, stop, status, **download_kwargs)
+            original = audio.audio_details(source)
+            output_format = task.options.get("output", "original")
+            if output_format != "original":
+                status(f"正在生成 {audio.OUTPUTS.get(output_format, output_format)} 音频…")
+            source = prepare_web_audio(source, stage, engine.ffmpeg, output_format,
+                                       task.options.get("mp3_bitrate", audio.DEFAULT_MP3_BITRATE), stop)
+            preserved = output_format == "original"
             if task.artist:
                 name = f"{task.artist} - {name}"
             if task.options.get("music_sidecars"):
                 attachments, errors = _stage_music_sidecars(task, source, stage, stop, status, session)
+            elif output_format != "original":
+                try:
+                    write_music_tags(source, task.title, task.artist)
+                except (MutagenError, OSError, ValueError) as error:
+                    errors.append(f"写入音频标签失败 · {error}")
         if stop.is_set():
             raise Cancelled()
         published, written = publish(source, target, name, str(task.id), expected_volume=disk)
-        details = _audio_result(source, published.name, preserved=preserved)
+        details = _audio_result(source, published.name, original, preserved=preserved)
         files = [str(published)]
         saved, existing = int(written), int(not written)
         post("log", ("已保存  " if written else "已存在  ") + published.name)

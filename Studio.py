@@ -63,6 +63,11 @@ from youtube_download import resolve_youtube
 QUALITY = {"AAC": "AAC-LC · 兼容", "ALAC": "ALAC · 无损", "ATMOS": "Dolby Atmos"}
 BILI_FORMATS = {"video": "视频 · MP4", "audio": "音频 · M4A", "flac": "音频 · 原始 FLAC", "mp3": "音频 · MP3"}
 YOUTUBE_FORMATS = {"video": "视频 · MP4", "audio": "音频 · M4A", "mp3": "音频 · MP3"}
+MUSIC_SOURCE_QUALITIES = {
+    "qq": {"auto": "自动 · 最佳可用", "128": "MP3 · 128 kbps", "320": "MP3 · 320 kbps", "flac": "FLAC · 无损"},
+    "netease": {"auto": "自动 · 最佳可用", "128": "标准", "192": "较高", "320": "极高",
+                "flac": "无损", "hires": "Hi-Res · 无损"},
+}
 QUEUE_SOURCES = {"all": "全部来源", SOURCE: "Apple Music", "bilibili": "哔哩哔哩", "qq": "QQ 音乐", "netease": "网易云音乐",
                  "youtube": "YouTube", "local": "本地转码"}
 TASK_LABELS = {"pending": "待下载", "running": "下载中", "complete": "已完成",
@@ -175,6 +180,11 @@ class Studio:
             self.fields["quality"].set("AAC")
         if self.fields["output"].get() not in audio.OUTPUTS:
             self.fields["output"].set("original")
+        self.source_quality_labels = {}
+        for source, choices in MUSIC_SOURCE_QUALITIES.items():
+            if self.fields[f"{source}_quality"].get() not in choices:
+                self.fields[f"{source}_quality"].set("auto")
+            self.source_quality_labels[source] = tk.StringVar(window, choices[self.fields[f"{source}_quality"].get()])
         self.quality_label = tk.StringVar(window, QUALITY[self.fields["quality"].get()])
         self.output_label = tk.StringVar(window, audio.OUTPUTS[self.fields["output"].get()])
         self.bili_format = tk.StringVar(window, BILI_FORMATS.get(self.preferences["bili_mode"], BILI_FORMATS["video"]))
@@ -553,13 +563,49 @@ class Studio:
         self.music_sidecars_box = ttk.Checkbutton(options, text="QQ 音乐与网易云 · 封面和歌词",
                                                  variable=self.fields["music_sidecars"], command=self.save_preferences,
                                                  style="Surface.TCheckbutton")
-        self.music_sidecars_box.grid(row=4, column=0, columnspan=5, sticky="w", pady=(5, 0))
+        self.music_sidecars_box.grid(row=7, column=0, columnspan=5, sticky="w", pady=(5, 0))
+        self.source_quality_widgets = {}
+        self.source_quality_boxes = {}
+        for row, (source, choices) in enumerate(MUSIC_SOURCE_QUALITIES.items(), 4):
+            label = self.label(options, QUEUE_SOURCES[source] + "音质", background=BG, muted=True)
+            label.grid(row=row, column=0, sticky="w", padx=(0, 7), pady=(5, 0))
+            box = ttk.Combobox(options, textvariable=self.source_quality_labels[source], values=list(choices.values()),
+                               width=17, state="readonly", style="Surface.TCombobox")
+            box.grid(row=row, column=1, sticky="w", pady=(5, 0))
+            box.bind("<<ComboboxSelected>>", self.quality_changed)
+            self.source_quality_widgets[source] = (label, box)
+            self.source_quality_boxes[source] = box
+        self.music_output_options = ttk.Frame(options, style="Surface.TFrame")
+        self.queue_options_expanded = False
+        self.music_output_options.grid(row=6, column=0, columnspan=5, sticky="ew", pady=(6, 0))
+        self.music_output_options.columnconfigure(1, weight=1)
+        self.label(self.music_output_options, "保存格式", background=BG, muted=True).grid(row=0, column=0, padx=(0, 7))
+        self.music_output_box = ttk.Combobox(
+            self.music_output_options, textvariable=self.output_label, values=list(audio.OUTPUTS.values()),
+            width=14, state="readonly", style="Surface.TCombobox",
+        )
+        self.music_output_box.grid(row=0, column=1, sticky="w")
+        self.music_output_box.bind("<<ComboboxSelected>>", self.quality_changed)
+        self.music_bitrate_label = self.label(self.music_output_options, "MP3 码率", background=BG, muted=True)
+        self.music_bitrate_label.grid(row=0, column=2, padx=(8, 5))
+        self.music_bitrate_box = ttk.Combobox(
+            self.music_output_options, values=audio.MP3_BITRATES, textvariable=self.fields["mp3_bitrate"],
+            width=5, state="readonly", style="Surface.TCombobox",
+        )
+        self.music_bitrate_box.grid(row=0, column=3)
+        self.music_bitrate_box.bind("<<ComboboxSelected>>", self.quality_changed)
+        self.queue_options_toggle = self.action(self.music_output_options, "来源设置", self.toggle_queue_options)
+        self.queue_options_toggle.grid(row=0, column=4, padx=(8, 0))
         options.columnconfigure(1, weight=0)
         options.columnconfigure(2, weight=1)
-        self.label(options, variable=self.path_summary, background=BG, muted=True, wrap=245).grid(
-            row=0, rowspan=2, column=2, sticky="w", padx=10)
-        self.action(options, "保存目录", self.browse_folder).grid(row=0, rowspan=2, column=3)
-        self.action(options, "打开", self.open_folder).grid(row=0, rowspan=2, column=4, padx=(6, 0))
+        path_options = ttk.Frame(options, style="Surface.TFrame")
+        path_options.grid(row=8, column=0, columnspan=5, sticky="ew", pady=(7, 0))
+        path_options.columnconfigure(0, weight=1)
+        self.queue_path_label = self.label(path_options, variable=self.path_summary, background=BG, muted=True)
+        self.queue_path_label.configure(width=1, wraplength=0)
+        self.queue_path_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.action(path_options, "保存目录", self.browse_folder).grid(row=0, column=1)
+        self.action(path_options, "打开", self.open_folder).grid(row=0, column=2, padx=(6, 0))
 
         results = self.panel(page, padding=(8, 6))
         results.grid(row=2, column=0, sticky="nsew")
@@ -600,6 +646,7 @@ class Studio:
         self.history = []
         self.history_text = None
         self.history_window = None
+        self.refresh_queue_options()
 
     def queue_music(self, items, begin=False):
         accepted = []
@@ -662,11 +709,30 @@ class Studio:
             self.queue_tree.selection_remove(*hidden)
         self.queue_tree.set_children("", *shown)
         self.queue_sort.apply()
+        self.refresh_queue_options()
+
+    def toggle_queue_options(self):
+        self.queue_options_expanded = not self.queue_options_expanded
+        self.refresh_queue_options()
+
+    def refresh_queue_options(self):
+        source = self.selected_queue_source()
+        expanded = source == "all" and self.queue_options_expanded
+        self.queue_options_toggle.configure(text="收起设置" if expanded else "来源设置")
+        if source == "all":
+            self.queue_options_toggle.grid()
+        else:
+            self.queue_options_toggle.grid_remove()
+        for widget in (self.music_bitrate_label, self.music_bitrate_box):
+            if self.output_label.get() == audio.OUTPUTS["mp3"]:
+                widget.grid()
+            else:
+                widget.grid_remove()
         for key, widgets in ((SOURCE, (self.apple_format_label, self.quality_box)),
                              ("bilibili", (self.bili_format_label, self.bili_format_box, self.bili_options)),
                              ("youtube", (self.youtube_format_label, self.youtube_format_box))):
             for widget in widgets:
-                if source in ("all", key):
+                if source == key or expanded:
                     widget.grid()
                 else:
                     widget.grid_remove()
@@ -674,6 +740,16 @@ class Studio:
             self.music_sidecars_box.grid()
         else:
             self.music_sidecars_box.grid_remove()
+        for key, widgets in self.source_quality_widgets.items():
+            for widget in widgets:
+                if source == key or expanded:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+        if source in ("all", SOURCE, "qq", "netease"):
+            self.music_output_options.grid()
+        else:
+            self.music_output_options.grid_remove()
 
     def selected_queue_source(self):
         return next(key for key, label in QUEUE_SOURCES.items() if label == self.queue_source.get())
@@ -790,8 +866,16 @@ class Studio:
                 lines.append(YOUTUBE_FORMATS.get(task.options.get("youtube_mode"), YOUTUBE_FORMATS["video"]))
             elif task.source == "local":
                 lines.extend((task.url, LOCAL_FORMATS.get(task.options.get("local_format"), "")))
-            elif task.source in ("qq", "netease") and task.options.get("music_sidecars"):
-                lines.append("保存封面和歌词")
+            elif task.source in ("qq", "netease"):
+                choices = MUSIC_SOURCE_QUALITIES[task.source]
+                legacy = "128" if task.source == "qq" else "legacy"
+                requested = task.options.get(f"{task.source}_quality", legacy)
+                lines.append("请求音质 · " + choices.get(requested, "旧任务来源设置"))
+                lines.append("保存格式 · " + audio.OUTPUTS.get(task.options.get("output", "original"), ""))
+                if task.options.get("output") == "mp3":
+                    lines.append(f"MP3 输出 · {task.options.get('mp3_bitrate', audio.DEFAULT_MP3_BITRATE)} kbps")
+                if task.options.get("music_sidecars"):
+                    lines.append("保存封面和歌词")
             lines.append(str(Path(task.options["folder"]) / task_category(task)))
         if task.error:
             lines.append(task.error)
@@ -1355,11 +1439,15 @@ class Studio:
 
     def quality_changed(self, _event):
         self.save_preferences()
+        self.refresh_queue_options()
 
     def snapshot(self):
         values = {key: var.get() for key, var in self.fields.items()}
         values["quality"] = next(key for key, label in QUALITY.items() if label == self.quality_label.get())
         values["output"] = next(key for key, label in audio.OUTPUTS.items() if label == self.output_label.get())
+        for source, choices in MUSIC_SOURCE_QUALITIES.items():
+            values[f"{source}_quality"] = next(key for key, label in choices.items()
+                                               if label == self.source_quality_labels[source].get())
         values["bili_mode"] = next(key for key, label in BILI_FORMATS.items() if label == self.bili_format.get())
         values["youtube_mode"] = next(key for key, label in YOUTUBE_FORMATS.items() if label == self.youtube_format.get())
         values["mp3_bitrate"] = int(values["mp3_bitrate"])
@@ -1385,6 +1473,8 @@ class Studio:
         self.preferences = values
         self.fields["quality"].set(values["quality"])
         self.fields["output"].set(values["output"])
+        for source in MUSIC_SOURCE_QUALITIES:
+            self.fields[f"{source}_quality"].set(values.get(f"{source}_quality", "auto"))
         self.fields["region"].set(values["region"])
         self.fields["native_account"].set(values["native_account"])
         self.fields["apple_web_clear_pending"].set(values.get("apple_web_clear_pending", False))
@@ -1723,6 +1813,8 @@ class Studio:
         self.quality_box.configure(state="disabled" if busy else "readonly")
         self.bili_format_box.configure(state="disabled" if busy else "readonly")
         self.youtube_format_box.configure(state="disabled" if busy else "readonly")
+        for control in (*self.source_quality_boxes.values(), self.music_output_box, self.music_bitrate_box):
+            control.configure(state="disabled" if busy else "readonly")
         self.bili_danmaku_box.configure(state=state)
         self.bili_subtitle_box.configure(state=state)
         self.bili_archive_box.configure(state=state)

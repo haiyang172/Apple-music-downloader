@@ -1,5 +1,6 @@
 """NetEase Music QR login and Windows-protected session storage."""
 
+from base64 import b64encode
 from dataclasses import dataclass, field
 from http.client import HTTPException
 from http.cookiejar import CookieJar, DefaultCookiePolicy
@@ -7,7 +8,7 @@ from http.cookies import CookieError, SimpleCookie
 import json
 from pathlib import Path
 import re
-from secrets import randbelow
+from secrets import choice, randbelow
 from tempfile import NamedTemporaryFile
 import time
 from urllib.error import HTTPError
@@ -23,10 +24,12 @@ _POLL = "/api/login/qrcode/client/login"
 _ACCOUNT = "/api/nuser/account/get"
 _USER_PLAYLISTS = "/api/user/playlist"
 _SONG_SEARCH = "/api/cloudsearch/pc"
+_PLAYER_V1 = "/api/song/enhance/player/url/v1"
 _PUBLIC_PLAYLIST_ROUTES = frozenset({"/api/v6/playlist/detail", "/api/v3/song/detail"})
 _AUTH_ROUTES = frozenset({_UNIQUE_KEY, _POLL})
 _API_ROUTES = _PUBLIC_PLAYLIST_ROUTES | {_ACCOUNT, _USER_PLAYLISTS, _SONG_SEARCH, "/api/playlist/detail",
-                                         "/api/song/detail", "/api/song/enhance/player/url"}
+                                         "/api/song/detail", "/api/song/enhance/player/url",
+                                         _PLAYER_V1}
 _USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
@@ -35,6 +38,12 @@ _COOKIE_VALUE = re.compile(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}"
 _AUTH_COOKIES = ("MUSIC_U", "__csrf")
 _MAX_RESPONSE = 4 * 1024 * 1024
 _MAX_SESSION = 32_768
+_WEAPI_KEY = b"0CoJUm6Qyw8W8jud"
+_WEAPI_IV = b"0102030405060708"
+_WEAPI_RSA_MODULUS = int(
+    "e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e"
+    "417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932"
+    "575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7", 16)
 
 
 class NeteaseAuthError(RuntimeError):
@@ -91,6 +100,82 @@ def _session(uid, values):
     return NeteaseSession(uid, _cookies(values))
 
 
+def _aes_cbc_encrypt(data, key, iv):
+    """Encrypt whole AES blocks with Windows CNG; no optional package is needed."""
+    import ctypes
+    from ctypes import wintypes
+
+    if len(key) != 16 or len(iv) != 16 or not data or len(data) % 16:
+        raise ValueError("无效的网易云音乐请求数据。")
+    try:
+        bcrypt = ctypes.WinDLL("bcrypt", use_last_error=True)
+    except (AttributeError, OSError):
+        raise NeteaseAuthError("Windows 无法准备网易云音乐音质请求。") from None
+    handle, ulong, pointer = wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p
+    signatures = {
+        "BCryptOpenAlgorithmProvider": [ctypes.POINTER(handle), wintypes.LPCWSTR, wintypes.LPCWSTR, ulong],
+        "BCryptSetProperty": [handle, wintypes.LPCWSTR, pointer, ulong, ulong],
+        "BCryptGetProperty": [handle, wintypes.LPCWSTR, pointer, ulong, ctypes.POINTER(ulong), ulong],
+        "BCryptGenerateSymmetricKey": [handle, ctypes.POINTER(handle), pointer, ulong, pointer, ulong, ulong],
+        "BCryptEncrypt": [handle, pointer, ulong, pointer, pointer, ulong, pointer, ulong, ctypes.POINTER(ulong), ulong],
+        "BCryptDestroyKey": [handle],
+        "BCryptCloseAlgorithmProvider": [handle, ulong],
+    }
+    for name, arguments in signatures.items():
+        operation = getattr(bcrypt, name)
+        operation.argtypes, operation.restype = arguments, ctypes.c_long
+
+    def checked(status):
+        if status != 0:
+            raise NeteaseAuthError("Windows 无法准备网易云音乐音质请求。")
+
+    provider, key_handle = handle(), handle()
+    key_buffer = ctypes.create_string_buffer(key, len(key))
+    key_object = None
+    try:
+        checked(bcrypt.BCryptOpenAlgorithmProvider(ctypes.byref(provider), "AES", None, 0))
+        mode = ctypes.create_unicode_buffer("ChainingModeCBC")
+        checked(bcrypt.BCryptSetProperty(provider, "ChainingMode", mode, ctypes.sizeof(mode), 0))
+        object_length, result_length = ulong(), ulong()
+        checked(bcrypt.BCryptGetProperty(provider, "ObjectLength", ctypes.byref(object_length),
+                                        ctypes.sizeof(object_length), ctypes.byref(result_length), 0))
+        key_object = ctypes.create_string_buffer(object_length.value)
+        checked(bcrypt.BCryptGenerateSymmetricKey(provider, ctypes.byref(key_handle), key_object,
+                                                 len(key_object), key_buffer, len(key), 0))
+        plaintext = ctypes.create_string_buffer(data, len(data))
+        iv_buffer = ctypes.create_string_buffer(iv, len(iv))
+        output = ctypes.create_string_buffer(len(data))
+        checked(bcrypt.BCryptEncrypt(key_handle, plaintext, len(data), None, iv_buffer, len(iv), output,
+                                     len(output), ctypes.byref(result_length), 0))
+        if result_length.value != len(data):
+            raise NeteaseAuthError("Windows 未能准备完整的网易云音乐音质请求。")
+        return output.raw
+    finally:
+        if key_handle:
+            bcrypt.BCryptDestroyKey(key_handle)
+        if provider:
+            bcrypt.BCryptCloseAlgorithmProvider(provider, 0)
+        ctypes.memset(key_buffer, 0, len(key_buffer))
+        if key_object is not None:
+            ctypes.memset(key_object, 0, len(key_object))
+
+
+def _weapi_body(params):
+    """Match the official web client's double AES-CBC and public-key RSA envelope."""
+    secret = "".join(choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(16))
+
+    def encrypt(text, key):
+        raw = text.encode("utf-8")
+        padding = 16 - len(raw) % 16
+        return b64encode(_aes_cbc_encrypt(raw + bytes([padding]) * padding, key, _WEAPI_IV)).decode("ascii")
+
+    text = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
+    encrypted = encrypt(encrypt(text, _WEAPI_KEY), secret.encode("ascii"))
+    rsa_input = int.from_bytes(secret[::-1].encode("ascii"), "big")
+    encrypted_key = format(pow(rsa_input, 65537, _WEAPI_RSA_MODULUS), "0256x")
+    return urlencode({"params": encrypted, "encSecKey": encrypted_key}).encode("ascii")
+
+
 def _request(path, params=None, *, chain=None, jar=None, cookies=()):
     if path not in _API_ROUTES and path not in _AUTH_ROUTES:
         raise ValueError("无效的网易云音乐接口。")
@@ -108,7 +193,18 @@ def _request(path, params=None, *, chain=None, jar=None, cookies=()):
     else:
         if jar is not None or chain is not None:
             raise ValueError("无效的网易云音乐账号请求。")
-        if query:
+        if path == _PLAYER_V1:
+            if (not isinstance(params, dict) or set(params) != {"ids", "level", "encodeType"}
+                    or not isinstance(params.get("ids"), str) or not re.fullmatch(r"\[[1-9][0-9]{0,19}\]", params["ids"])
+                    or params.get("level") not in ("standard", "higher", "exhigh", "lossless", "hires")
+                    or params.get("encodeType") != "flac"):
+                raise ValueError("无效的网易云音乐音质请求。")
+            # The official web client rewrites this route to a WEAPI form POST.
+            # Keep the current session on the same origin; transport never changes entitlement.
+            url = _SITE + "/weapi/song/enhance/player/url/v1"
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            data = _weapi_body({**params, "csrf_token": dict(cookies).get("__csrf", "")})
+        elif query:
             url += "?" + query.decode("ascii")
         if cookies:
             headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in cookies)

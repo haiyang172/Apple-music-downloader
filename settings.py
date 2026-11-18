@@ -19,6 +19,8 @@ DEFAULTS = {
     "category": "",
     "quality": "AAC",
     "output": "original",
+    "qq_quality": "auto",
+    "netease_quality": "auto",
     "bili_mode": "video",
     "youtube_mode": "video",
     "bili_danmaku": False,

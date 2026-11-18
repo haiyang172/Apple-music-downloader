@@ -228,7 +228,8 @@ $sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'apple_web_login
     'qq_auth.py', 'qq_catalog.py', 'qq_download.py', 'qq_sidecars.py', 'share_links.py', 'short_music_links.py',
     'shared_music.py', 'shared_music_cache.py', 'shared_music_ui.py',
     'local_convert.py', 'local_convert_ui.py', 'windows_drop.py', 'video_links_ui.py',
-    'youtube_download.py', 'netease_auth.py', 'netease_catalog.py', 'netease_download.py', 'netease_sidecars.py', 'music_tagging.py', 'playlist_export.py')
+    'youtube_download.py', 'netease_auth.py', 'netease_catalog.py', 'netease_download.py', 'netease_sidecars.py',
+    'music_tagging.py', 'web_audio.py', 'playlist_export.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
 foreach ($path in @($distribution, $buildTools)) {
     [void][IO.Directory]::CreateDirectory($path)
