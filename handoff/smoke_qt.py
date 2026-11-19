@@ -274,6 +274,27 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
         assert "已登录" in ap_dialog.status.text()
         ap_dialog.close()
 
-    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists, favorites and Apple login passed.")
+    # Apple library: connected token lists personal songs and queues one.
+    from music_library import LibraryClient
+    from qtui.library import AppleLibraryDialog
+    window.core.preferences["session"] = settings.protect_session("x" * 60)
+    library_fixture = [{"id": "1", "type": "songs", "title": "资料库歌曲", "artist": "资料库歌手",
+                        "album": "资料库专辑", "duration": 90,
+                        "url": "https://music.apple.com/au/song/1"}]
+    with patch.object(LibraryClient, "items", return_value=(library_fixture, None)):
+        lib_dialog = AppleLibraryDialog(window, window.core)
+        lib_dialog.load_songs()
+        deadline = time.monotonic() + 15
+        while lib_dialog.busy and time.monotonic() < deadline:
+            lib_dialog.poll()
+            time.sleep(0.02)
+        assert len(lib_dialog.rows) == 1 and lib_dialog.rows[0]["title"] == "资料库歌曲"
+        lib_dialog.table.selectRow(0)
+        lib_dialog.enqueue()
+    lib_task = [t for t in window.core.list_tasks() if t.url == "https://music.apple.com/au/song/1"]
+    assert len(lib_task) == 1 and lib_task[0].source == "apple_music"
+    lib_dialog.close()
+
+    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists, favorites, Apple login and library passed.")
     window.core.close()
     window.close()

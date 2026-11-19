@@ -30,6 +30,9 @@ class ApplePage(QWidget):
         self.account_button = QPushButton("账户")
         self.account_button.clicked.connect(self.open_account)
         header.addWidget(self.account_button)
+        self.library_button = QPushButton("资料库")
+        self.library_button.clicked.connect(self.open_library)
+        header.addWidget(self.library_button)
         layout.addLayout(header)
 
         bar = QHBoxLayout()
@@ -77,6 +80,11 @@ class ApplePage(QWidget):
     def open_account(self):
         from qtui.apple_account import AppleAccountDialog
         dialog = AppleAccountDialog(self, self.core)
+        dialog.exec()
+
+    def open_library(self):
+        from qtui.library import AppleLibraryDialog
+        dialog = AppleLibraryDialog(self, self.core)
         dialog.exec()
 
     def resolve(self):

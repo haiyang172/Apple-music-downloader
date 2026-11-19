@@ -246,7 +246,7 @@ try {
     foreach ($file in $sources) { Copy-Item -LiteralPath (Join-Path $studio $file) -Destination $stage }
     $qtui = Join-Path $stage 'qtui'
     [void][IO.Directory]::CreateDirectory($qtui)
-    foreach ($file in @('__init__.py', 'core.py', 'main_window.py', 'pages.py', 'theme.py', 'tag_editor.py', 'youtube.py', 'music.py', 'bilibili.py', 'apple.py', 'account.py', 'preview.py', 'apple_account.py')) {
+    foreach ($file in @('__init__.py', 'core.py', 'main_window.py', 'pages.py', 'theme.py', 'tag_editor.py', 'youtube.py', 'music.py', 'bilibili.py', 'apple.py', 'account.py', 'preview.py', 'apple_account.py', 'library.py')) {
         Copy-Item -LiteralPath (Join-Path $studio ('qtui\' + $file)) -Destination $qtui
     }
     Set-Content -LiteralPath (Join-Path $stage 'app-version.txt') -Value $Version -Encoding ASCII

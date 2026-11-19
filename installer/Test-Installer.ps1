@@ -3051,6 +3051,26 @@ with patch.object(LoginService, "status", return_value={"running": True, "logged
     assert "已登录" in ap_dialog.status.text()
     ap_dialog.close()
 
+# Qt Apple 资料库：已连接令牌读取个人歌曲并加入队列。
+from music_library import LibraryClient
+from qtui.library import AppleLibraryDialog
+qt_window.core.preferences["session"] = settings.protect_session("x" * 60)
+library_fixture = [{"id": "9999999998", "type": "songs", "title": "资料库歌曲", "artist": "资料库歌手",
+                    "album": "资料库专辑", "duration": 90,
+                    "url": "https://music.apple.com/au/song/9999999998"}]
+with patch.object(LibraryClient, "items", return_value=(library_fixture, None)):
+    lib_dialog = AppleLibraryDialog(qt_window, qt_window.core)
+    lib_dialog.load_songs()
+    deadline = time.monotonic() + 15
+    while lib_dialog.busy and time.monotonic() < deadline:
+        lib_dialog.poll()
+        time.sleep(0.02)
+    assert len(lib_dialog.rows) == 1 and lib_dialog.rows[0]["title"] == "资料库歌曲"
+    lib_dialog.table.selectRow(0)
+    lib_dialog.enqueue()
+lib_task = [t for t in qt_window.core.list_tasks() if t.url == "https://music.apple.com/au/song/9999999998"]
+assert len(lib_task) == 1 and lib_task[0].source == "apple_music"
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
