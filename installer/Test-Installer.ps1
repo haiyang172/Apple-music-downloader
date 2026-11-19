@@ -2828,6 +2828,29 @@ while (tag_dialog.busy or tag_dialog.messages) and time.monotonic() < deadline:
 assert tag_file.read_bytes() == tag_original
 tag_dialog.close()
 
+# Qt YouTube 页：解析链接并加入队列。
+qt_window.core.preferences["folder"] = str(profile)
+qt_window.core.preferences["category"] = ""
+import qtui.youtube
+yt_fixture = {"source": "youtube", "title": "测试频道", "rows": [
+    {"source": "youtube", "id": "abcdefghijk", "url": "https://www.youtube.com/watch?v=abcdefghijk",
+     "title": "测试视频", "artist": "测试频道", "position": 1, "total": 1, "duration": 30,
+     "batch_key": "youtube:abcdefghijk", "batch_title": "测试频道"}]}
+with patch.object(qtui.youtube, "resolve_youtube", return_value=yt_fixture):
+    qt_window.show_page("youtube")
+    yt_page = qt_window.pages["youtube"]
+    yt_page.entry.setText("https://www.youtube.com/watch?v=abcdefghijk")
+    yt_page.resolve()
+    deadline = time.monotonic() + 15
+    while yt_page.busy and time.monotonic() < deadline:
+        yt_page.poll()
+        time.sleep(0.02)
+    assert len(yt_page.rows) == 1 and yt_page.caption.text() == "测试频道"
+    yt_page.table.selectRow(0)
+    yt_page.enqueue(False)
+yt_task = [t for t in qt_window.core.list_tasks() if t.url == "https://www.youtube.com/watch?v=abcdefghijk"]
+assert len(yt_task) == 1 and yt_task[0].source == "youtube" and yt_task[0].state == "pending"
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")

@@ -67,6 +67,14 @@ class QtApp:
         tasks = self.queue_store.add(rows)
         return [task.id for task in tasks]
 
+    def enqueue(self, rows):
+        """Add prepared platform rows and attach the current download options."""
+        tasks = self.queue_store.add(rows)
+        ids = [task.id for task in tasks if task.options is None]
+        if ids:
+            self.queue_store.prepare(ids, download_options(self.preferences))
+        return [task.id for task in tasks]
+
     def start(self, task_ids=None):
         """Run pending tasks in a worker thread and stream status via messages."""
         if self.busy:

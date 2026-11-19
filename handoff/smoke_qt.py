@@ -45,6 +45,31 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     task = window.core.queue_store.get(ids[0])
     assert task.state == "complete", task.error
     assert task.files and Path(task.files[0]).suffix == ".mp3" and Path(task.files[0]).is_file()
-    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion passed.")
+
+    # YouTube page resolve + enqueue via fixture.
+    window.core.preferences["folder"] = scratch
+    window.core.preferences["category"] = ""
+    import qtui.youtube
+    from unittest.mock import patch
+    fixture = {"source": "youtube", "title": "测试频道", "rows": [
+        {"source": "youtube", "id": "abcdefghijk", "url": "https://www.youtube.com/watch?v=abcdefghijk",
+         "title": "测试视频", "artist": "测试频道", "position": 1, "total": 1, "duration": 30,
+         "batch_key": "youtube:abcdefghijk", "batch_title": "测试频道"}]}
+    with patch.object(qtui.youtube, "resolve_youtube", return_value=fixture):
+        window.show_page("youtube")
+        page = window.pages["youtube"]
+        page.entry.setText("https://www.youtube.com/watch?v=abcdefghijk")
+        page.resolve()
+        deadline = time.monotonic() + 15
+        while page.busy and time.monotonic() < deadline:
+            page.poll()
+            time.sleep(0.02)
+        assert len(page.rows) == 1 and page.caption.text() == "测试频道"
+        page.table.selectRow(0)
+        page.enqueue(False)
+    yt_task = [t for t in window.core.list_tasks() if t.url == "https://www.youtube.com/watch?v=abcdefghijk"]
+    assert len(yt_task) == 1 and yt_task[0].source == "youtube" and yt_task[0].state == "pending"
+
+    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube page passed.")
     window.core.close()
     window.close()
