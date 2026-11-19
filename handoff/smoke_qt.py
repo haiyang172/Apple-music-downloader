@@ -114,6 +114,25 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     bili_task = [t for t in window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1xx411c7mD?p=1"]
     assert len(bili_task) == 1 and bili_task[0].source == "bilibili" and bili_task[0].state == "pending"
 
-    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube, QQ music and Bilibili pages passed.")
+    # Apple Music page search + enqueue via fixture.
+    from music_catalog import CatalogClient
+    apple_fixture = [{"id": "1", "type": "songs", "title": "测试歌曲", "artist": "测试歌手",
+                      "album": "测试专辑", "duration": 90, "url": "https://music.apple.com/au/song/1"}]
+    with patch.object(CatalogClient, "search", return_value=apple_fixture):
+        window.show_page("music")
+        page = window.pages["music"]
+        page.entry.setText("测试歌曲")
+        page.resolve()
+        deadline = time.monotonic() + 15
+        while page.busy and time.monotonic() < deadline:
+            page.poll()
+            time.sleep(0.02)
+        assert len(page.rows) == 1 and page.rows[0]["title"] == "测试歌曲"
+        page.table.selectRow(0)
+        page.enqueue(False)
+    apple_task = [t for t in window.core.list_tasks() if t.url == "https://music.apple.com/au/song/1"]
+    assert len(apple_task) == 1 and apple_task[0].source == "apple_music" and apple_task[0].state == "pending"
+
+    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube, QQ, Bilibili and Apple pages passed.")
     window.core.close()
     window.close()

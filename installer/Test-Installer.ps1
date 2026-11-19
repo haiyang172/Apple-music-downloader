@@ -2893,6 +2893,25 @@ with patch.object(bili_catalog, "resolve_video", return_value=bili_fixture):
 bili_task = [t for t in qt_window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1xx411c7mD?p=1"]
 assert len(bili_task) == 1 and bili_task[0].source == "bilibili" and bili_task[0].state == "pending"
 
+# Qt Apple Music 页：搜索并加入队列。
+from music_catalog import CatalogClient
+apple_fixture = [{"id": "9999999999", "type": "songs", "title": "测试歌曲", "artist": "测试歌手",
+                  "album": "测试专辑", "duration": 90, "url": "https://music.apple.com/au/song/9999999999"}]
+with patch.object(CatalogClient, "search", return_value=apple_fixture):
+    qt_window.show_page("music")
+    apple_page = qt_window.pages["music"]
+    apple_page.entry.setText("测试歌曲")
+    apple_page.resolve()
+    deadline = time.monotonic() + 15
+    while apple_page.busy and time.monotonic() < deadline:
+        apple_page.poll()
+        time.sleep(0.02)
+    assert len(apple_page.rows) == 1 and apple_page.rows[0]["title"] == "测试歌曲"
+    apple_page.table.selectRow(0)
+    apple_page.enqueue(False)
+apple_task = [t for t in qt_window.core.list_tasks() if t.url == "https://music.apple.com/au/song/9999999999"]
+assert len(apple_task) == 1 and apple_task[0].source == "apple_music" and apple_task[0].state == "pending"
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")

@@ -330,6 +330,9 @@ def build_pages(qt_app, core):
             widget = QueuePage(core)
         elif key == "local":
             widget = LocalPage(core)
+        elif key == "music":
+            from qtui.apple import ApplePage
+            widget = ApplePage(core)
         elif key == "youtube":
             from qtui.youtube import YoutubePage
             widget = YoutubePage(core)
