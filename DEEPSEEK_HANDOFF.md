@@ -7,11 +7,11 @@
 | 项目 | 交接时的值 |
 | --- | --- |
 | 已发布供日常使用 | [v0.3.38](https://github.com/haiyang172/Media-Download-Desk/releases/tag/v0.3.38)，本地 `installer/dist/0.3.38/MediaDownloadDesk-Setup.exe` |
-| 已发布源码基线 | `0321f6a5a950aabea3930609d2ec70f5531fedb1`， GitHub 分支 `media-download-desk`（2026-11-19 已推进到本轮的 v0.3.39 修复提交） |
+| 0.3.40 候选包 | `installer/dist/0.3.40/MediaDownloadDesk-Setup.exe`（2026-11-20 构建，SHA-256 `cd14c52f78d3b218348c6186a67e6ee292fae8d625ef47785da7c16b71818e30`），完整安装检查通过 |
+| 已发布源码基线 | `0321f6a5a950aabea3930609d2ec70f5531fedb1`， GitHub 分支 `media-download-desk`（已推进到本轮 0.3.40 提交） |
 | D 盘工作分支 | `handoff/v0.3.39` |
-| 未发布的 v0.3.39 功能快照 | `92684f7d212d63d0f4dbfaec3feb2cbc40f4bb51`，该提交包含下表 9 个文件 |
-| 2026-11-19 修复轮 | `156ada6`（标签目录与 Vorbis 注释缺陷、中断恢复与扩展测试）、`68f37bf`（PowerShell 5.1 构建兼容、仓库改名），候选包已构建并通过完整安装检查 |
-| 源码入口 | 双击 `Run.cmd` 使用 D 盘随附的 Python 运行 `Studio.py`。标签编辑与中断恢复已可用 |
+| 2026-11-19/20 开发轮 | 标签修复、NetEase 修复、Qt 完整迁移（默认界面）、深色模式、窗口记忆、完成通知、歌单追更、曲库去重、个人歌单/收藏夹/资料库 |
+| 源码入口 | `Run.cmd`（`Studio.py`）按 `settings.ui_mode` 分发，默认 Qt；`RunQt.cmd` 直接启动 Qt |
 | 产品范围 | [产品策划案](docs/影音下载台-产品策划案.md)、[应用使用说明](README.md) |
 
 GitHub 的旧 `main` 与当前产品源码有较大差异。查看这一轮的完整功能改动可运行 `git diff 0321f6a 92684f7`。D 盘分支和交接提交保存在本地。
