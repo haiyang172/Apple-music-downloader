@@ -90,6 +90,30 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     qq_task = [t for t in window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"]
     assert len(qq_task) == 1 and qq_task[0].source == "qq" and qq_task[0].state == "pending"
 
-    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube and QQ music pages passed.")
+    # Bilibili page resolve + enqueue via fixture.
+    import bili_catalog
+    bili_fixture = {"id": "BV1xx411c7mD", "title": "测试视频", "uploader": "测试UP",
+                    "source_category": "音乐", "media_category": "music",
+                    "rows": [{"source": "bilibili", "url": "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+                              "cid": 101, "id": "BV1xx411c7mD", "position": 1, "total": 1,
+                              "title": "测试歌曲", "audio_title": "测试歌曲", "artist": "测试歌手",
+                              "uploader": "测试UP", "source_category": "音乐", "media_category": "music",
+                              "duration": 90, "batch_key": "bilibili:BV1xx411c7mD", "batch_title": "测试视频"}]}
+    with patch.object(bili_catalog, "resolve_video", return_value=bili_fixture):
+        window.show_page("bilibili")
+        page = window.pages["bilibili"]
+        page.entry.setText("https://www.bilibili.com/video/BV1xx411c7mD")
+        page.resolve()
+        deadline = time.monotonic() + 15
+        while page.busy and time.monotonic() < deadline:
+            page.poll()
+            time.sleep(0.02)
+        assert len(page.rows) == 1 and page.rows[0]["audio_title"] == "测试歌曲"
+        page.table.selectRow(0)
+        page.enqueue(False)
+    bili_task = [t for t in window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1xx411c7mD?p=1"]
+    assert len(bili_task) == 1 and bili_task[0].source == "bilibili" and bili_task[0].state == "pending"
+
+    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube, QQ music and Bilibili pages passed.")
     window.core.close()
     window.close()

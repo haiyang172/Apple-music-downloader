@@ -2870,6 +2870,29 @@ with patch.object(qq_catalog, "search_songs", return_value=song_fixture):
 qq_task = [t for t in qt_window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyXhX"]
 assert len(qq_task) == 1 and qq_task[0].source == "qq" and qq_task[0].state == "pending"
 
+# Qt B 站页：解析分 P 并加入队列。
+bili_fixture = {"id": "BV1xx411c7mD", "title": "测试视频", "uploader": "测试UP",
+                "source_category": "音乐", "media_category": "music",
+                "rows": [{"source": "bilibili", "url": "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+                          "cid": 101, "id": "BV1xx411c7mD", "position": 1, "total": 1,
+                          "title": "测试歌曲", "audio_title": "测试歌曲", "artist": "测试歌手",
+                          "uploader": "测试UP", "source_category": "音乐", "media_category": "music",
+                          "duration": 90, "batch_key": "bilibili:BV1xx411c7mD", "batch_title": "测试视频"}]}
+with patch.object(bili_catalog, "resolve_video", return_value=bili_fixture):
+    qt_window.show_page("bilibili")
+    bili_page = qt_window.pages["bilibili"]
+    bili_page.entry.setText("https://www.bilibili.com/video/BV1xx411c7mD")
+    bili_page.resolve()
+    deadline = time.monotonic() + 15
+    while bili_page.busy and time.monotonic() < deadline:
+        bili_page.poll()
+        time.sleep(0.02)
+    assert len(bili_page.rows) == 1 and bili_page.rows[0]["audio_title"] == "测试歌曲"
+    bili_page.table.selectRow(0)
+    bili_page.enqueue(False)
+bili_task = [t for t in qt_window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1xx411c7mD?p=1"]
+assert len(bili_task) == 1 and bili_task[0].source == "bilibili" and bili_task[0].state == "pending"
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
