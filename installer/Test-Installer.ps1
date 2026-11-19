@@ -2779,6 +2779,18 @@ for key in ("music", "bilibili", "qq", "netease", "youtube", "douyin", "local"):
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation and both themes.")
+
+# Tkinter 深色模式：dark_mode 设置后启动切换为深色调色板，关闭后恢复浅色。
+settings.save({**settings.load(), "dark_mode": True})
+window, app = new_window()
+try:
+    assert app.dark is True and app.background == "#12151c"
+finally:
+    app.close()
+settings.save({**settings.load(), "dark_mode": False})
+Studio.apply_palette(False)
+assert Studio.BG == "#eff5f2" and Studio.PANEL == "#ffffff"
+print("Tkinter dark mode switched palettes at startup and restored the light theme.")
 '@
     $smokeScript = Join-Path $testRoot 'smoke.py'
     [IO.File]::WriteAllText($smokeScript, $smokeCode, [Text.UTF8Encoding]::new($false))

@@ -38,6 +38,7 @@ DEFAULTS = {
     "window_geometry": "",
     "window_maximized": False,
     "notify_done": True,
+    "dark_mode": False,
 }
 
 

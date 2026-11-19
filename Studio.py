@@ -96,6 +96,26 @@ NAV_SIGNED_IN = "#08664f"
 ACCENT = "#11715e"
 BORDER = "#cdded6"
 
+_LIGHT_PALETTE = dict(
+    bg=BG, panel=PANEL, ink=INK, muted=MUTED, accent=ACCENT, border=BORDER,
+    nav=NAV, nav_active=NAV_ACTIVE, nav_account=NAV_ACCOUNT, nav_signed_in=NAV_SIGNED_IN,
+    scrollbar="#d2e2db", scrollbar_active="#b0cbc0", trough="#e0ebe6",
+    heading="#f1f7f4", selected="#dbefe5", heading_active="#e7f2ed",
+)
+_DARK_PALETTE = dict(
+    bg="#12151c", panel="#1b2029", ink="#e6eaf2", muted="#8a93a5", accent="#5b8def",
+    border="#2c3340", nav="#171a21", nav_active="#2a3140", nav_account="#1f242e",
+    nav_signed_in="#5b8def", scrollbar="#333b49", scrollbar_active="#49536a",
+    trough="#0f1217", heading="#232936", selected="#2c3a55", heading_active="#2c3444",
+)
+
+
+def apply_palette(dark):
+    """Swap the module colour constants before any widget or style is created."""
+    palette = _DARK_PALETTE if dark else _LIGHT_PALETTE
+    for name, value in palette.items():
+        globals()[name.upper()] = value
+
 
 class _FLASHWINFO(ctypes.Structure):
     _fields_ = (("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p), ("dwFlags", ctypes.c_uint),
@@ -159,6 +179,12 @@ class Studio:
         self.library_cache = LibraryCache(settings.DATA / "library.sqlite3")
         self.bili_favorites_cache = BiliFavoritesCache(settings.DATA / "bili-favorites.sqlite3")
         self.shared_music_cache = SharedMusicCache(settings.DATA / "shared-music.sqlite3")
+        try:
+            dark_mode = bool(settings.load().get("dark_mode", False))
+        except (OSError, ValueError):
+            dark_mode = False
+        self.dark = dark_mode
+        apply_palette(dark_mode)
         self.background = BG
         self.queue_store = QueueStore(settings.DATA / "downloads.sqlite3")
         recovered = self.queue_store.recover()
@@ -491,26 +517,26 @@ class Studio:
                 ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"}),
             ]}),
         ])
-        style.configure("Music.Vertical.TScrollbar", background="#d2e2db", troughcolor=PANEL,
-                        bordercolor=PANEL, lightcolor="#d2e2db", darkcolor="#d2e2db", relief="flat",
+        style.configure("Music.Vertical.TScrollbar", background=SCROLLBAR, troughcolor=PANEL,
+                        bordercolor=PANEL, lightcolor=SCROLLBAR, darkcolor=SCROLLBAR, relief="flat",
                         arrowsize=round(9 * self.scale), gripcount=0)
-        style.map("Music.Vertical.TScrollbar", background=[("active", "#b0cbc0")])
+        style.map("Music.Vertical.TScrollbar", background=[("active", SCROLLBAR_ACTIVE)])
         style.layout("Rail.Vertical.TScrollbar", style.layout("Music.Vertical.TScrollbar"))
         style.configure("Rail.Vertical.TScrollbar", background=NAV_ACTIVE, troughcolor=NAV,
                         bordercolor=NAV, lightcolor=NAV, darkcolor=NAV, relief="flat",
                         arrowsize=round(7 * self.scale), gripcount=0)
-        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#e0ebe6",
-                        lightcolor=ACCENT, darkcolor=ACCENT, bordercolor="#e0ebe6", thickness=6)
+        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=TROUGH,
+                        lightcolor=ACCENT, darkcolor=ACCENT, bordercolor=TROUGH, thickness=6)
         for name, height in (("Music", 64), ("Queue", 38)):
-            heading = "#f1f7f4" if name == "Music" else PANEL
+            heading = HEADING if name == "Music" else PANEL
             style.configure(f"{name}.Treeview", rowheight=round(height * self.scale), font=(self.font, 11),
                             fieldbackground=PANEL, background=PANEL, foreground=INK, relief="flat",
                             borderwidth=0, bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL)
             style.configure(f"{name}.Treeview.Heading", padding=(round(8 * self.scale), round(7 * self.scale)),
                             font=(self.font, 10, "bold"), background=heading, foreground=MUTED,
                             bordercolor=heading, lightcolor=heading, darkcolor=heading, relief="flat")
-            style.map(f"{name}.Treeview", background=[("selected", "#dbefe5")], foreground=[("selected", INK)])
-            style.map(f"{name}.Treeview.Heading", background=[("active", "#e7f2ed")])
+            style.map(f"{name}.Treeview", background=[("selected", SELECTED)], foreground=[("selected", INK)])
+            style.map(f"{name}.Treeview.Heading", background=[("active", HEADING_ACTIVE)])
 
     def label(self, parent, text="", *, variable=None, large=False, muted=False, background=PANEL, wrap=615):
         options = {"textvariable": variable} if variable is not None else {"text": text}
@@ -1368,7 +1394,15 @@ class Studio:
             row=4, column=0, columnspan=3, sticky="w", pady=(8, 8))
         self.action(card, "保存设置", self.save_preferences, primary=True).grid(row=5, column=0, sticky="w")
 
-        updates = self.card(page, 3)
+        appearance = self.card(page, 3)
+        appearance.columnconfigure(0, weight=1)
+        self.label(appearance, "界面").grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(appearance, text="深色模式（下次启动生效）", variable=self.fields["dark_mode"],
+                        command=self.save_preferences, style="Card.TCheckbutton").grid(row=1, column=0, sticky="w")
+        self.label(appearance, "与 Qt 新界面共享同一主题设置。", muted=True).grid(
+            row=2, column=0, sticky="w", pady=(4, 0))
+
+        updates = self.card(page, 4)
         updates.columnconfigure(0, weight=1)
         self.update_status = tk.StringVar(page, f"版本 {APP_VERSION}" if APP_VERSION else "版本未知")
         self.label(updates, variable=self.update_status, wrap=385).grid(row=0, column=0, sticky="w")
