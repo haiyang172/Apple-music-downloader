@@ -151,6 +151,27 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
         assert acct_dialog.session == acct_session and acct_saved.get("session") == acct_session
         acct_dialog.close()
 
-    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube, QQ, Bilibili, Apple and account pages passed.")
+    # Qt music preview dialog: probe declaration shown and enqueue works.
+    import qq_download
+    from qtui.preview import MusicPreviewDialog
+    preview_row = {"url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhW",
+                   "title": "预览歌曲", "artist": "预览歌手", "duration": 90}
+    declaration = {"source": "qq", "requested": "auto", "selected": None,
+                   "label": "平台提供 · MP3 · 320 kb/s", "codec": "MP3", "bitrate": 320000,
+                   "size": 1000000, "duration": 90}
+    with patch.object(qq_download, "probe_qq", return_value=declaration):
+        pv_dialog = MusicPreviewDialog(window, window.core, "qq", preview_row)
+        deadline = time.monotonic() + 15
+        while pv_dialog.info is None and time.monotonic() < deadline:
+            pv_dialog.poll()
+            time.sleep(0.02)
+        assert pv_dialog.info == declaration
+        assert "MP3" in pv_dialog.source_info.text()
+        pv_dialog.enqueue()
+    pv_task = [t for t in window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhW"]
+    assert len(pv_task) == 1 and pv_task[0].source == "qq" and pv_task[0].state == "pending"
+    pv_dialog.close()
+
+    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube, QQ, Bilibili, Apple, account and preview pages passed.")
     window.core.close()
     window.close()

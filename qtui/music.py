@@ -62,6 +62,9 @@ class MusicPage(QWidget):
         self.status = QLabel("")
         self.status.setWordWrap(True)
         actions.addWidget(self.status, 1)
+        self.preview_button = QPushButton("下载预览")
+        self.preview_button.clicked.connect(self.preview)
+        actions.addWidget(self.preview_button)
         self.queue_button = QPushButton("加入队列")
         self.queue_button.clicked.connect(lambda: self.enqueue(False))
         actions.addWidget(self.queue_button)
@@ -79,6 +82,15 @@ class MusicPage(QWidget):
     def open_account(self):
         from qtui.account import MusicAccountDialog
         dialog = MusicAccountDialog(self, self.source)
+        dialog.exec()
+
+    def preview(self):
+        rows = [index.row() for index in self.table.selectionModel().selectedRows() if index.row() in self.rows]
+        if len(rows) != 1:
+            self.status.setText("请先选择一首歌曲。")
+            return
+        from qtui.preview import MusicPreviewDialog
+        dialog = MusicPreviewDialog(self, self.core, self.source, self.rows[rows[0]])
         dialog.exec()
 
     def resolve(self):
@@ -126,6 +138,7 @@ class MusicPage(QWidget):
     def _refresh(self):
         idle = not self.busy
         self.resolve_button.setEnabled(idle)
+        self.preview_button.setEnabled(bool(self.rows) and idle)
         self.queue_button.setEnabled(bool(self.rows) and idle)
         self.download_button.setEnabled(bool(self.rows) and idle)
 

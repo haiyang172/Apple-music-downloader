@@ -2929,6 +2929,26 @@ with patch.object(NeteaseAuth, "load", return_value=None), \
     assert acct_dialog.session == acct_session and acct_saved.get("session") == acct_session
     acct_dialog.close()
 
+# Qt 预览页：读取音轨规格并加入队列。
+from qtui.preview import MusicPreviewDialog
+import qq_download
+preview_row = {"url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhW",
+               "title": "预览歌曲", "artist": "预览歌手", "duration": 90}
+preview_declaration = {"source": "qq", "requested": "auto", "selected": None,
+                       "label": "平台提供 · MP3 · 320 kb/s", "codec": "MP3", "bitrate": 320000,
+                       "size": 1000000, "duration": 90}
+with patch.object(qq_download, "probe_qq", return_value=preview_declaration):
+    pv_dialog = MusicPreviewDialog(qt_window, qt_window.core, "qq", preview_row)
+    deadline = time.monotonic() + 15
+    while pv_dialog.info is None and time.monotonic() < deadline:
+        pv_dialog.poll()
+        time.sleep(0.02)
+    assert pv_dialog.info == preview_declaration and "MP3" in pv_dialog.source_info.text()
+    pv_dialog.enqueue()
+pv_task = [t for t in qt_window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhW"]
+assert len(pv_task) == 1 and pv_task[0].source == "qq" and pv_task[0].state == "pending"
+pv_dialog.close()
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
