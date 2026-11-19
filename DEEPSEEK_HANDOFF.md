@@ -86,6 +86,14 @@ Set-Location -LiteralPath 'D:\AMDL'
 
 v0.3.38 安装包 SHA-256 为 `af4468ea5198022e99bfc92825802ef64760886f18589284104057623982bb70`。交接时对照原工作区逐文件校验了 88 个源码和资源文件、3,292 个运行和构建文件（含该安装包）。校验清单位于本机 `.git/info/d-drive-handoff-sha256.json`。
 
+## 2026-11-20 开发轮（v0.3.40 进行中）
+
+- **网易云修复。** 2026 年网易云下线了匿名取流（`outer/url` 全量 404、匿名 weapi 无地址），现在未登录下载直接提示「需要登录」。登录请求带官方 `realIP` 参数（国内地址）绕过海外节点风控；播放地址 v1 路由改为现行网页端的 AES-ECB eapi 信封（CNG ECB 已用 FIPS-197 验证），旧 bitrate 路由改为 weapi POST。登录链路 begin/poll 已实测可用，eapi 取流需用户扫码后实测。
+- **Qt 迁移启动。** `StudioQt.py` + `qtui/` 包：左侧导航、各平台占位页、只读下载队列页（读真实队列库）、设置页浅深主题切换（持久化到 `dark_mode`）。`RunQt.cmd` 启动。安装包已集成 PySide6-Essentials 6.12.0（约 210 MB，THIRD_PARTY.md 已记录许可），安装检查用 `QT_QPA_PLATFORM=offscreen` 验证骨架。Tkinter 仍是默认界面。
+- **Tkinter 增强。** 窗口大小/位置/最大化状态在关闭时保存、启动时恢复；一批任务结束且窗口不在前台时任务栏闪烁加提示音（`notify_done` 设置）。
+- **歌单追更。** [playlist_watch.py](playlist_watch.py) 按批次保存已见曲目日志；QQ/网易云歌单页新增「追更新歌」按钮只入队新增曲目，普通入队自动更新日志。
+- **待办。** 抖音应用内直下（需 a_bogus 签名或 Edge CDP 浏览器方案，下轮继续）；曲库去重审阅；Qt 逐页迁移（Apple/B站/QQ/网易云/YouTube、账户、预览、本地转码、标签编辑）；网易云 eapi 取流与登录需真实账号验证；安装包仍是 0.3.39 版本号，功能收敛后升 0.3.40 并发布。
+
 ## 给 DeepSeek 的第一条任务（已接手的交接点）
 
 > 请从 D:\AMDL 的 handoff/v0.3.39 分支接手影音下载台。先读 DEEPSEEK_HANDOFF.md，再复现 verify_tags.py 的 WinError 5。修复目录检查，验证五种音频格式的标签修改、外部改写保护和重启后撤销，并补上中断批次的恢复验证。请在临时测试文件上操作，报告实际通过的用例和仍待验证的项目。全部通过后再构建 v0.3.39 候选安装包。
