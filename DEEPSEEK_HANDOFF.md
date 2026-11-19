@@ -7,10 +7,11 @@
 | 项目 | 交接时的值 |
 | --- | --- |
 | 已发布供日常使用 | [v0.3.38](https://github.com/haiyang172/media-download-desk/releases/tag/v0.3.38)，本地 `installer/dist/0.3.38/MediaDownloadDesk-Setup.exe` |
-| 已发布源码基线 | `0321f6a5a950aabea3930609d2ec70f5531fedb1`， GitHub 分支 `media-download-desk` |
+| 已发布源码基线 | `0321f6a5a950aabea3930609d2ec70f5531fedb1`， GitHub 分支 `media-download-desk`（2026-11-19 已推进到本轮的 v0.3.39 修复提交） |
 | D 盘工作分支 | `handoff/v0.3.39` |
 | 未发布的 v0.3.39 功能快照 | `92684f7d212d63d0f4dbfaec3feb2cbc40f4bb51`，该提交包含下表 9 个文件 |
-| 源码入口 | 双击 `Run.cmd` 使用 D 盘随附的 Python 运行 `Studio.py`。当前源码包含尚待修复的标签编辑功能 |
+| 2026-11-19 修复轮 | `156ada6`（标签目录与 Vorbis 注释缺陷、中断恢复与扩展测试）、`68f37bf`（PowerShell 5.1 构建兼容、仓库改名），候选包已构建并通过完整安装检查 |
+| 源码入口 | 双击 `Run.cmd` 使用 D 盘随附的 Python 运行 `Studio.py`。标签编辑与中断恢复已可用 |
 | 产品范围 | [产品策划案](docs/影音下载台-产品策划案.md)、[应用使用说明](README.md) |
 
 GitHub 的旧 `main` 与当前产品源码有较大差异。查看这一轮的完整功能改动可运行 `git diff 0321f6a 92684f7`。D 盘分支和交接提交保存在本地。
@@ -34,6 +35,7 @@ GitHub 的旧 `main` 与当前产品源码有较大差异。查看这一轮的�
 1. ~~首次调用 `TagEditStore.apply()` 失败~~ 已修复。`_directory()` 改为先判断路径是否已存在，只对不存在的路径调用 `mkdir()`，盘符根（如 `C:\`）不再触发 `PermissionError: [WinError 5]`。每一级仍执行 `_plain_directory()`，对符号链接、目录联接和异常文件类型的检查全部保留。
 2. ~~`VCommentDict` 报 `TypeError: pop expected at most 1 argument, got 2`~~ 已修复。FLAC/Opus 的 Vorbis 注释继承自 `list`，`list.pop` 覆盖了 `DictMixin.pop`；`_edit()` 的非 MP3/MP4 分支改用 `key in tags` + `del tags[key]`。该错误在 WinError 5 修复后才暴露。
 3. `handoff/Build-Local.ps1` 的 `-CheckOnly` 一行式在 Windows PowerShell 5.1 下内嵌双引号会被剥掉（`SyntaxError`）。已改写为无引号形式（`root.joinpath(sys.argv[2])`），5.1 和 7 均可运行。
+4. 同类问题在 `installer/Build.ps1` 的 qrcodegen 解包与 Wrapper Lite 版本钉读取中也存在（`"qrcodegen.py"`、`("VERSION", ...)` 被剥掉），已改为通过 `sys.argv` 传递。`installer/Test-Installer.ps1` 是 UTF-8 无 BOM，5.1 会把第 77 行的中文 `'影音下载台'` 读成乱码导致解析失败，已加 UTF-8 BOM。以上改动在 PowerShell 5.1 和 7 下均可运行。
 
 ## 新增功能与扩展验证
 
@@ -60,9 +62,9 @@ Set-Location -LiteralPath 'D:\AMDL'
 ## 验收顺序
 
 - **真实格式和音质。** 修复首个错误后，让上述五格式测试全部通过。检查有/无标签、中文、单字段清除。对带封面、歌词和无关标签的样本直接比对这些数据，核对 MP3/WAV 的 ID3 版本和最终音频内容。现有测试覆盖了解码样本和撤销后的完整字节，不足以单独证明所有标签在修改期间均保留。
-- **撤销和异常恢复。** 从已完成批次重新打开应用后撤销，原文件须逐字节相同。用测试副本模拟外部修改、磁盘空间不足及中途取消，确保不覆盖后续变更。当前 `list_history()` 不会改写原音频；`apply()` 和 `undo()` 才会触发中断恢复。界面的撤销按钮只接受 `applied`；若只有中断批次，缺少直达恢复入口。验证这个场景，并给用户明确的恢复路径。
-- **界面和入口。** 此前使用模拟存储验证过字段勾选、空值清除、后台结果返回、繁忙时关闭、缩放和底部按钮。真正的文件写入与撤销仍须从「本地转码」和「下载队列」入口分别走通。保持平台侧栏和原有下载任务行为。
-- **Windows 安装包。** 定向测试通过后用下面命令打候选包并运行完整安装检查。已有测试在临时目录解包，覆盖程序启动、资料库、下载队列、转码等流程。全新 Windows 的标准用户安装、覆盖升级和卸载属于不同验收项，仍待实机或虚拟机验证。
+- **撤销和异常恢复。** 已通过。重启后撤销原文件逐字节相同；外部修改时 apply/undo 均停止并标记 conflict 且不覆盖；准备与写入阶段取消分别保留原文件并回滚；模拟的 applying/undoing 中断批次由 `recover()` 和界面「恢复中断批次」按钮还原，恢复期间的外部更改受到保护。
+- **界面和入口。** 已通过。「本地转码」和「下载队列」两个入口均已用真实文件走通应用→历史→撤销，文件名不变、平台侧栏和下载任务不受影响。字段勾选、空值清除、缩放和底部按钮此前已用模拟存储验证，本轮未改动这些路径。
+- **Windows 安装包。** 已于 2026-11-19 构建候选包并通过完整安装检查：`.\handoff\Build-Local.ps1` 全量构建成功，`.\installer\Test-Installer.ps1 -Setup '.\installer\dist\0.3.39\MediaDownloadDesk-Setup.exe'` 全部段落通过（含新增标签用例）。候选包 SHA-256 为 `6b0b2ae5b2720967d93fca22d1f665df8d2aca65539fd4e8a84f63173e42853a`，约 500 MB，仍只在本地 `installer/dist/0.3.39/`。全新 Windows 的标准用户安装、覆盖升级和卸载属于不同验收项，仍待实机或虚拟机验证。
 
 ```powershell
 Set-Location -LiteralPath 'D:\AMDL'
@@ -88,4 +90,4 @@ v0.3.38 安装包 SHA-256 为 `af4468ea5198022e99bfc92825802ef64760886f185892841
 
 > 请从 D:\AMDL 的 handoff/v0.3.39 分支接手影音下载台。先读 DEEPSEEK_HANDOFF.md，再复现 verify_tags.py 的 WinError 5。修复目录检查，验证五种音频格式的标签修改、外部改写保护和重启后撤销，并补上中断批次的恢复验证。请在临时测试文件上操作，报告实际通过的用例和仍待验证的项目。全部通过后再构建 v0.3.39 候选安装包。
 
-以上内容已于 2026-11-19 完成：两个存储层缺陷修复、`verify_tags.py` 全绿（含新增的中断恢复与双入口用例）、UI 恢复入口上线。剩余项：构建 v0.3.39 候选安装包并运行 `Test-Installer.ps1` 完整安装检查，以及全新 Windows 标准用户安装、覆盖升级、卸载的实机或虚拟机验收。
+以上内容已于 2026-11-19 完成：两个存储层缺陷修复、`verify_tags.py` 全绿（含新增的中断恢复与双入口用例）、UI 恢复入口上线、v0.3.39 候选安装包构建成功且 `Test-Installer.ps1` 完整安装检查通过。剩余项：全新 Windows 的标准用户安装、覆盖升级、卸载的实机或虚拟机验收。
