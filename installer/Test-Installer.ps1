@@ -2854,7 +2854,7 @@ assert len(yt_task) == 1 and yt_task[0].source == "youtube" and yt_task[0].state
 # Qt QQ 音乐页：搜索并加入队列。
 song_fixture = {"source": "qq", "title": "测试歌手", "total": 1, "rows": [
     {"position": 1, "title": "测试歌曲", "artist": "测试歌手", "album": "测试专辑",
-     "duration": 90, "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"}]}
+     "duration": 90, "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyXhX"}]}
 with patch.object(qq_catalog, "search_songs", return_value=song_fixture):
     qt_window.show_page("qq")
     qq_page = qt_window.pages["qq"]
@@ -2867,7 +2867,7 @@ with patch.object(qq_catalog, "search_songs", return_value=song_fixture):
     assert len(qq_page.rows) == 1 and qq_page.rows[0]["title"] == "测试歌曲"
     qq_page.table.selectRow(0)
     qq_page.enqueue(False)
-qq_task = [t for t in qt_window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"]
+qq_task = [t for t in qt_window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyXhX"]
 assert len(qq_task) == 1 and qq_task[0].source == "qq" and qq_task[0].state == "pending"
 
 qt_window.close()
