@@ -2949,6 +2949,37 @@ pv_task = [t for t in qt_window.core.list_tasks() if t.url == "https://y.qq.com/
 assert len(pv_task) == 1 and pv_task[0].source == "qq" and pv_task[0].state == "pending"
 pv_dialog.close()
 
+# Qt QQ 个人歌单：登录后读取、打开并加入队列。
+from qq_auth import QqAuth, QqSession
+qq_qt_session = QqSession("fixture1234", "fixture-key", "Fixture")
+qt_playlist = {"id": "42", "title": "QQ 测试歌单", "kind": "created", "total": 1,
+               "url": "", "private": True, "_account_id": "fixture1234"}
+qt_tracks_result = {"source": "qq", "title": qt_playlist["title"], "total": 1, "rows": [
+    {"position": 1, "title": "私密歌曲", "artist": "歌手", "duration": 90,
+     "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhZ"}]}
+with patch.object(QqAuth, "load", return_value=qq_qt_session), \
+     patch.object(qq_catalog, "list_playlists", return_value={"source": "qq", "rows": [qt_playlist], "total": 1}), \
+     patch.object(qq_catalog, "resolve_playlist", return_value=qt_tracks_result):
+    qt_window.show_page("qq")
+    qq_page = qt_window.pages["qq"]
+    qq_page.show_playlists()
+    deadline = time.monotonic() + 15
+    while qq_page.busy and time.monotonic() < deadline:
+        qq_page.poll()
+        time.sleep(0.02)
+    assert qq_page.playlist_view and len(qq_page.rows) == 1
+    qq_page.table.selectRow(0)
+    qq_page.open_playlist()
+    deadline = time.monotonic() + 15
+    while qq_page.busy and time.monotonic() < deadline:
+        qq_page.poll()
+        time.sleep(0.02)
+    assert not qq_page.playlist_view and len(qq_page.rows) == 1 and qq_page.rows[0]["title"] == "私密歌曲"
+    qq_page.table.selectRow(0)
+    qq_page.enqueue(False)
+qq_priv_task = [t for t in qt_window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhZ"]
+assert len(qq_priv_task) == 1 and qq_priv_task[0].source == "qq" and qq_priv_task[0].state == "pending"
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")

@@ -172,6 +172,37 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     assert len(pv_task) == 1 and pv_task[0].source == "qq" and pv_task[0].state == "pending"
     pv_dialog.close()
 
-    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube, QQ, Bilibili, Apple, account and preview pages passed.")
+    # QQ personal playlists: list, open and enqueue a private track.
+    from qq_auth import QqAuth, QqSession
+    qq_session = QqSession("fixture1234", "fixture-key", "Fixture")
+    playlist = {"id": "42", "title": "QQ 测试歌单", "kind": "created", "total": 1,
+                "url": "", "private": True, "_account_id": "fixture1234"}
+    tracks_result = {"source": "qq", "title": playlist["title"], "total": 1, "rows": [
+        {"position": 1, "title": "私密歌曲", "artist": "歌手", "duration": 90,
+         "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhZ"}]}
+    with patch.object(QqAuth, "load", return_value=qq_session), \
+         patch.object(qq_catalog, "list_playlists", return_value={"source": "qq", "rows": [playlist], "total": 1}), \
+         patch.object(qq_catalog, "resolve_playlist", return_value=tracks_result):
+        window.show_page("qq")
+        page = window.pages["qq"]
+        page.show_playlists()
+        deadline = time.monotonic() + 15
+        while page.busy and time.monotonic() < deadline:
+            page.poll()
+            time.sleep(0.02)
+        assert page.playlist_view and len(page.rows) == 1
+        page.table.selectRow(0)
+        page.open_playlist()
+        deadline = time.monotonic() + 15
+        while page.busy and time.monotonic() < deadline:
+            page.poll()
+            time.sleep(0.02)
+        assert not page.playlist_view and len(page.rows) == 1 and page.rows[0]["title"] == "私密歌曲"
+        page.table.selectRow(0)
+        page.enqueue(False)
+    qq_priv_task = [t for t in window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhZ"]
+    assert len(qq_priv_task) == 1 and qq_priv_task[0].source == "qq" and qq_priv_task[0].state == "pending"
+
+    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview and personal playlists passed.")
     window.core.close()
     window.close()
