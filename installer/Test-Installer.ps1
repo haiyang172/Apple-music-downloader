@@ -2912,6 +2912,23 @@ with patch.object(CatalogClient, "search", return_value=apple_fixture):
 apple_task = [t for t in qt_window.core.list_tasks() if t.url == "https://music.apple.com/au/song/9999999999"]
 assert len(apple_task) == 1 and apple_task[0].source == "apple_music" and apple_task[0].state == "pending"
 
+# Qt 账户页：网易云扫码登录成功后保存会话。
+from netease_auth import NeteaseAuth, NeteaseSession, NeteaseAccount, NeteasePoll
+from qtui.account import MusicAccountDialog
+acct_saved = {}
+acct_qr = SimpleNamespace(url="https://music.163.com/login?codekey=fixture")
+acct_session = NeteaseSession(12345, (("MUSIC_U", "fixture-cookie"),))
+with patch.object(NeteaseAuth, "load", return_value=None), \
+     patch.object(NeteaseAuth, "begin", return_value=acct_qr), \
+     patch.object(NeteaseAuth, "poll", return_value=NeteasePoll("success", acct_session)), \
+     patch.object(NeteaseAuth, "save", side_effect=lambda s: acct_saved.update(session=s)), \
+     patch.object(NeteaseAuth, "check", return_value=NeteaseAccount(12345, "测试用户")):
+    acct_dialog = MusicAccountDialog(qt_window, "netease")
+    assert acct_dialog.polling
+    acct_dialog.poll()
+    assert acct_dialog.session == acct_session and acct_saved.get("session") == acct_session
+    acct_dialog.close()
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
