@@ -295,6 +295,19 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     assert len(lib_task) == 1 and lib_task[0].source == "apple_music"
     lib_dialog.close()
 
-    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists, favorites, Apple login and library passed.")
+    # Settings page saves the download configuration.
+    import audio
+    window.show_page("settings")
+    settings_page = window.pages["settings"]
+    settings_page.folder.setText(scratch)
+    settings_page.category.setText("测试分类")
+    settings_page.output.setCurrentText(audio.OUTPUTS["mp3"])
+    settings_page.mp3_bitrate.setCurrentText("192")
+    settings_page.save()
+    saved = settings.load()
+    assert (saved["folder"], saved["category"], saved["output"], saved["mp3_bitrate"]) == (
+        scratch, "测试分类", "mp3", 192)
+
+    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists, favorites, Apple login, library and settings passed.")
     window.core.close()
     window.close()

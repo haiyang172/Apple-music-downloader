@@ -3071,6 +3071,19 @@ with patch.object(LibraryClient, "items", return_value=(library_fixture, None)):
 lib_task = [t for t in qt_window.core.list_tasks() if t.url == "https://music.apple.com/au/song/9999999998"]
 assert len(lib_task) == 1 and lib_task[0].source == "apple_music"
 
+# Qt 设置页：保存下载配置。
+import audio
+qt_window.show_page("settings")
+qt_settings = qt_window.pages["settings"]
+qt_settings.folder.setText(str(profile))
+qt_settings.category.setText("测试分类")
+qt_settings.output.setCurrentText(audio.OUTPUTS["mp3"])
+qt_settings.mp3_bitrate.setCurrentText("192")
+qt_settings.save()
+qt_saved = settings.load()
+assert (qt_saved["folder"], qt_saved["category"], qt_saved["output"], qt_saved["mp3_bitrate"]) == (
+    str(profile), "测试分类", "mp3", 192)
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
