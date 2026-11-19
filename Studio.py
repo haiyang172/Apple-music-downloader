@@ -96,6 +96,11 @@ ACCENT = "#11715e"
 BORDER = "#cdded6"
 
 
+class _FLASHWINFO(ctypes.Structure):
+    _fields_ = (("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p), ("dwFlags", ctypes.c_uint),
+                ("uCount", ctypes.c_uint), ("dwTimeout", ctypes.c_uint))
+
+
 def backend_locations():
     installed = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "apmyx"
     return ROOT / "backend", installed, ROOT.parent / "GUI-downloader"
@@ -237,6 +242,17 @@ class Studio:
         height = min(round(670 * self.scale), window.winfo_screenheight() - 100)
         window.geometry(f"{width}x{height}")
         window.minsize(min(round(790 * self.scale), width), min(round(590 * self.scale), height))
+        match = re.fullmatch(r"(\d{3,5})x(\d{3,5})\+(-?\d{1,6})\+(-?\d{1,6})", str(self.preferences.get("window_geometry", "")))
+        if match:
+            saved_width, saved_height, saved_x, saved_y = map(int, match.groups())
+            screen_width, screen_height = window.winfo_screenwidth(), window.winfo_screenheight()
+            minimum_width = min(round(790 * self.scale), screen_width)
+            minimum_height = min(round(590 * self.scale), screen_height)
+            if (minimum_width <= saved_width <= screen_width + 100 and minimum_height <= saved_height <= screen_height + 100
+                    and saved_x + saved_width > 80 and saved_y + saved_height > 80):
+                window.geometry(f"{saved_width}x{saved_height}+{saved_x}+{saved_y}")
+        if self.preferences.get("window_maximized"):
+            window.state("zoomed")
         icon = ROOT / "assets" / "AMDLStudio.ico"
         if icon.is_file():
             window.iconbitmap(str(icon))
@@ -2121,6 +2137,12 @@ class Studio:
             self.login_service.close()
         except (OSError, RuntimeError):
             pass
+        try:
+            values = {**self.snapshot(), "window_geometry": self.window.geometry(),
+                      "window_maximized": self.window.state() == "zoomed"}
+            self.store(values)
+        except (OSError, RuntimeError, ValueError, tk.TclError):
+            pass
         for timer in (self.start_timer, self.pump_timer, self.update_timer, self.queue_add_render_timer):
             if timer:
                 self.window.after_cancel(timer)
@@ -2129,6 +2151,33 @@ class Studio:
         self.closed = True
         self.window.destroy()
         return True
+
+    def _notify_completion(self, count, errors):
+        """Beep and flash the taskbar when a batch finishes with saved files."""
+        if not self.preferences.get("notify_done", True) or count <= 0:
+            return
+        try:
+            winsound.MessageBeep(winsound.MB_ICONASTERISK if not errors else winsound.MB_ICONEXCLAMATION)
+        except (OSError, RuntimeError):
+            pass
+        try:
+            focused = self.window.focus_get() is not None
+        except tk.TclError:
+            focused = True
+        if not focused:
+            self._flash_taskbar()
+
+    def _flash_taskbar(self):
+        info = _FLASHWINFO()
+        info.cbSize = ctypes.sizeof(info)
+        info.hwnd = self.window.winfo_id()
+        info.dwFlags = 3 | 12  # FLASHW_ALL | FLASHW_TIMERNOFG
+        info.uCount = 4
+        info.dwTimeout = 0
+        try:
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except (OSError, AttributeError, ctypes.ArgumentError):
+            pass
 
     def log_message(self, value):
         self.history.append(value)
@@ -2265,6 +2314,8 @@ class Studio:
                     value = f"{state} · 新增 {saved} · 已存在 {existing} · 失败 {errors}"
                     if waiting:
                         value += f" · 等待原保存磁盘 {waiting}"
+                    if saved or existing:
+                        self._notify_completion(saved + existing, errors)
                 self.status.set(value)
                 self.log_message(value)
         if self.closing and self.finish_close():

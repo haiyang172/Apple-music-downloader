@@ -332,6 +332,9 @@ def wait_for(window, condition):
     assert condition(), "The application did not reach the expected state"
 
 
+Studio.Studio._notify_completion = lambda _self, _count, _errors: None
+
+
 Studio.configure_windows()
 release_url = "https://github.com/haiyang172/Media-Download-Desk/releases/tag/v999.0.0"
 with patch.object(app_update, "check_update", return_value=app_update.UpdateCheck("available", "999.0.0", release_url)) as check:
@@ -1601,6 +1604,25 @@ try:
     assert private_task.state == "failed" and "封面网络错误" in private_task.error
     assert [Path(name).suffix for name in private_task.files] == [".mp3", ".lrc"]
     assert mutagen.File(private_task.files[0]).tags["TIT2"].text == ["NetEase Private Fixture"]
+
+    # 歌单追更：入队后自动记录曲目，追更只加入新增曲目。
+    import playlist_watch
+    watch = playlist_watch.PlaylistWatch(settings.DATA / "playlist-watch.json").load()
+    assert any("1973665667" in url for entry in watch.batches.values() for url in entry["tracks"])
+    assert str(netease.watch_button.cget("state")) == "normal"
+    netease.watch_button.invoke()
+    wait_for(window, lambda: "没有新增曲目" in netease.status.get())
+    watch_row = dict(netease_result["rows"][0], title="NetEase Watch Fixture",
+                     url="https://music.163.com/song?id=1973665669")
+    netease.rows["watch-fixture"] = watch_row
+    netease.watch_button.invoke()
+    wait_for(window, lambda: not app.busy)
+    watch_task = [item for item in app.queue_store.list_tasks() if item.url == watch_row["url"]]
+    assert len(watch_task) == 1 and watch_task[0].state == "pending" and not watch_task[0].files
+    assert netease.status.get().startswith("追更 · 已加入 1 首新增曲目")
+    assert "1973665669" in playlist_watch.PlaylistWatch(settings.DATA / "playlist-watch.json").load().batches[
+        next(iter(watch.batches))]["tracks"]
+
     app.fields["music_sidecars"].set(False)
     netease_account.logout()
     assert not netease.rows and netease_account.auth.load() is None

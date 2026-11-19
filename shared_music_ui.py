@@ -12,7 +12,9 @@ import webbrowser
 import netease_catalog
 import qq_catalog
 import shared_music
+import settings
 from music_browser import TreeSort, _duration
+from playlist_watch import PlaylistWatch
 from qr_account_ui import NeteaseAccountPanel, QqAccountPanel
 from share_links import links_in_text
 from short_music_links import expand_short_music_link, short_music_source
@@ -149,6 +151,8 @@ class SharedMusicBrowser:
             self.queue_button.pack(side="right", padx=(0, 6))
             self.preview_button = app.action(downloads, "下载预览", self.preview_download)
             self.preview_button.pack(side="left", padx=(3, 6))
+            self.watch_button = app.action(downloads, "追更新歌", self.watch_playlist)
+            self.watch_button.pack(side="left", padx=(0, 6))
 
         headings = {"position": "序号", "title": "歌曲", "artist": "艺人", "duration": "时长"}
         self.tree = ttk.Treeview(card, columns=tuple(headings), show="headings",
@@ -635,6 +639,8 @@ class SharedMusicBrowser:
             self.queue_all_button.configure(state="normal" if self.rows and can_enqueue and self.view != "search" else "disabled")
             self.preview_button.configure(state="normal" if selected and len(self.tree.selection()) == 1
                                           and not library else "disabled")
+            self.watch_button.configure(state="normal" if self.rows and can_enqueue and self.view == "tracks"
+                                        else "disabled")
 
     def preview_download(self):
         selected = self.tree.selection()
@@ -676,8 +682,49 @@ class SharedMusicBrowser:
             return
         if rows:
             count = self.app.enqueue_tasks(rows, begin)
-            if count and not begin:
-                self.status.set(f"已加入队列 {count} 首")
+            if count:
+                self._watch_snapshot()
+                if not begin:
+                    self.status.set(f"已加入队列 {count} 首")
+
+    def _watch_snapshot(self):
+        """Record every track of the open playlist so 追更 only adds new ones."""
+        if self.view != "tracks":
+            return
+        try:
+            rows = self._queued_rows([dict(item) for item in self.rows.values()])
+            batch_key = next((row.get("batch_key") for row in rows if row.get("batch_key")), None)
+            if batch_key is None:
+                return
+            watch = PlaylistWatch(settings.DATA / "playlist-watch.json").load()
+            _new_rows, complete = watch.diff(batch_key, rows)
+            watch.commit(batch_key, complete)
+        except (OSError, ValueError):
+            pass
+
+    def watch_playlist(self):
+        """Enqueue only tracks the open playlist gained since it was last seen."""
+        if self.busy or self.app.closing or self.batch_busy:
+            return
+        if self.view != "tracks":
+            self.status.set("追更需要先打开一个具体歌单。")
+            return
+        try:
+            rows = self._queued_rows([dict(item) for item in self.rows.values()])
+            batch_key = next((row.get("batch_key") for row in rows if row.get("batch_key")), None)
+            if batch_key is None:
+                self.status.set("当前列表无法追更。")
+                return
+            watch = PlaylistWatch(settings.DATA / "playlist-watch.json").load()
+            new_rows, complete = watch.diff(batch_key, rows)
+            if not new_rows:
+                self.status.set("该歌单没有新增曲目。")
+                return
+            count = self.app.enqueue_tasks(new_rows, False)
+            watch.commit(batch_key, complete)
+            self.status.set(f"追更 · 已加入 {count} 首新增曲目。" if count else "新增曲目已在队列中。")
+        except (OSError, RuntimeError, ValueError) as error:
+            self.status.set(str(error))
 
     def _cancel_batch(self):
         self.batch_stop.set()

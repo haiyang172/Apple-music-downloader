@@ -35,6 +35,9 @@ DEFAULTS = {
     "auto_service": True,
     "native_account": False,
     "apple_web_clear_pending": False,
+    "window_geometry": "",
+    "window_maximized": False,
+    "notify_done": True,
 }
 
 
