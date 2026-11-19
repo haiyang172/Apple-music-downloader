@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Setup
@@ -333,7 +333,7 @@ def wait_for(window, condition):
 
 
 Studio.configure_windows()
-release_url = "https://github.com/haiyang172/media-download-desk/releases/tag/v999.0.0"
+release_url = "https://github.com/haiyang172/Media-Download-Desk/releases/tag/v999.0.0"
 with patch.object(app_update, "check_update", return_value=app_update.UpdateCheck("available", "999.0.0", release_url)) as check:
     window, app = new_window()
     wait_for(window, lambda: app.update_release == release_url)
