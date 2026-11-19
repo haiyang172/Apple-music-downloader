@@ -34,8 +34,11 @@ def main():
         start = body.index("\nimport tag_edit\nfrom music_tagging import write_music_tags")
         if "Five audio tag formats" not in body[start:]:
             raise RuntimeError("Tag test section not found in Test-Installer.ps1")
+        section = body[start:]
+        if "# Qt 界面骨架" in section:
+            section = section.split("# Qt 界面骨架", 1)[0]
         context = {**globals(), **locals()}
-        exec(compile(helpers + body[start:], str(test) + " [tag section]", "exec"), context)
+        exec(compile(helpers + section, str(test) + " [tag section]", "exec"), context)
 
 
 if __name__ == "__main__":

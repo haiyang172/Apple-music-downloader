@@ -2761,6 +2761,7 @@ print("Dedup review deleted the marked duplicate and kept the unique files.")
 
 # Qt 界面骨架：离屏构建主窗口、导航、队列页与主题切换。
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+from unittest.mock import patch
 import StudioQt
 qt_window = StudioQt.build_window(dark=False)
 assert qt_window.windowTitle() == "影音下载台"
