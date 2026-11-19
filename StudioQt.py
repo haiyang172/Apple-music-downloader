@@ -19,6 +19,7 @@ for library in (ROOT.parent / "playlist-download" / "python-deps", ROOT / "lib")
         sys.path.insert(0, str(library))
 
 import settings  # noqa: E402
+from qtui.core import QtApp  # noqa: E402
 from qtui.main_window import MainWindow  # noqa: E402
 from qtui.theme import apply_theme  # noqa: E402
 
@@ -27,10 +28,11 @@ def build_window(dark=None):
     """Create the shell window (used by tests as well as main())."""
     from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication(sys.argv[:1])
+    qt_app = QApplication.instance() or QApplication(sys.argv[:1])
     dark = bool(settings.load().get("dark_mode", False)) if dark is None else bool(dark)
-    apply_theme(app, dark)
-    window = MainWindow(app, APP_VERSION)
+    apply_theme(qt_app, dark)
+    core = QtApp(ROOT)
+    window = MainWindow(qt_app, core, APP_VERSION)
     window.resize(1040, 700)
     return window
 

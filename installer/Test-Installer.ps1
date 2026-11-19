@@ -2776,9 +2776,26 @@ assert qt_window.pages["settings"].dark is False
 for key in ("music", "bilibili", "qq", "netease", "youtube", "douyin", "local"):
     qt_window.show_page(key)
     assert qt_window.stack.currentWidget() is qt_window.pages[key]
+
+# Qt 本地转码：入队并运行，生成转换文件且任务完成。
+qt_out = profile / "qt-convert"
+qt_out.mkdir()
+qt_ids = qt_window.core.queue_local([str(audio)], "mp3", str(qt_out))
+assert len(qt_ids) == 1
+qt_window.core.start(qt_ids)
+deadline = time.monotonic() + 90
+while qt_window.core.busy and time.monotonic() < deadline:
+    qt_window.pages["queue"].poll()
+    time.sleep(0.05)
+qt_task = qt_window.core.queue_store.get(qt_ids[0])
+assert qt_task.state == "complete", qt_task.error
+assert qt_task.files and Path(qt_task.files[0]).suffix == ".mp3" and Path(qt_task.files[0]).is_file()
+qt_window.pages["queue"].refresh()
+assert qt_window.pages["queue"].table.rowCount() == len(app.queue_store.list_tasks())
+
 qt_window.close()
 qt_window.deleteLater()
-print("The Qt shell booted offscreen with the real queue, navigation and both themes.")
+print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
 
 # Tkinter 深色模式：dark_mode 设置后启动切换为深色调色板，关闭后恢复浅色。
 settings.save({**settings.load(), "dark_mode": True})

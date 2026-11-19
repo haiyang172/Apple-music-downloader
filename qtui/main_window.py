@@ -11,9 +11,10 @@ from qtui.pages import build_pages
 class MainWindow(QMainWindow):
     """Top-level window of the migrating Qt interface."""
 
-    def __init__(self, app, version):
+    def __init__(self, qt_app, core, version):
         super().__init__()
-        self.app = app
+        self.app = qt_app
+        self.core = core
         self.version = version
         self.setWindowTitle("影音下载台")
         self.setMinimumSize(860, 560)
@@ -32,7 +33,7 @@ class MainWindow(QMainWindow):
         brand.setProperty("brand", True)
         rail_layout.addWidget(brand)
         rail_layout.addSpacing(14)
-        built = build_pages(self.app)
+        built = build_pages(qt_app, core)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons = {}
@@ -64,7 +65,7 @@ class MainWindow(QMainWindow):
         status.addWidget(self.status_label)
 
         self.current = None
-        self.show_page("queue" if not self.buttons else next(iter(self.buttons)))
+        self.show_page("queue")
 
     def show_page(self, key):
         if key not in self.pages:
