@@ -6,7 +6,7 @@
 
 | 项目 | 交接时的值 |
 | --- | --- |
-| 已发布供日常使用 | [v0.3.38](https://github.com/haiyang172/Apple-music-downloader/releases/tag/v0.3.38)，本地 `installer/dist/0.3.38/MediaDownloadDesk-Setup.exe` |
+| 已发布供日常使用 | [v0.3.38](https://github.com/haiyang172/media-download-desk/releases/tag/v0.3.38)，本地 `installer/dist/0.3.38/MediaDownloadDesk-Setup.exe` |
 | 已发布源码基线 | `0321f6a5a950aabea3930609d2ec70f5531fedb1`， GitHub 分支 `media-download-desk` |
 | D 盘工作分支 | `handoff/v0.3.39` |
 | 未发布的 v0.3.39 功能快照 | `92684f7d212d63d0f4dbfaec3feb2cbc40f4bb51`，该提交包含下表 9 个文件 |

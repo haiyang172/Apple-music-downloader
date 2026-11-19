@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-REPOSITORY = "haiyang172/Apple-music-downloader"
+REPOSITORY = "haiyang172/media-download-desk"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 _LATEST_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 _MAX_RELEASE_BYTES = 1024 * 1024

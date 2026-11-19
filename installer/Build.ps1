@@ -126,7 +126,7 @@ function Install-QrEncoder([string]$Python, [string]$Library) {
             if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial }
         }
     }
-    & $Python -I -B -c 'import pathlib, sys, zipfile; package = zipfile.ZipFile(sys.argv[1]); name = "qrcodegen.py"; (pathlib.Path(sys.argv[2]) / name).write_bytes(package.read(name))' $cache $Library
+    & $Python -I -B -c 'import pathlib, sys, zipfile; package = zipfile.ZipFile(sys.argv[1]); (pathlib.Path(sys.argv[2]) / sys.argv[3]).write_bytes(package.read(sys.argv[3]))' $cache $Library qrcodegen.py
     if ($LASTEXITCODE -ne 0) { throw 'Could not stage the pinned QR encoder.' }
 }
 
@@ -179,7 +179,7 @@ function Install-AppleWebLogin([string]$Destination) {
 }
 
 function Get-WrapperLiteArchive([string]$Python, [string]$LoginSource) {
-    $json = & $Python -I -B -c 'import json, runpy, sys; m = runpy.run_path(sys.argv[1]); print(json.dumps({k: m[k] for k in ("VERSION", "ASSET", "ASSET_URL", "ASSET_SIZE", "ASSET_SHA256")}))' $LoginSource
+    $json = & $Python -I -B -c 'import json, runpy, sys; m = runpy.run_path(sys.argv[1]); print(json.dumps({k: m[k] for k in sys.argv[2:]}))' $LoginSource VERSION ASSET ASSET_URL ASSET_SIZE ASSET_SHA256
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned Wrapper Lite release.' }
     $pin = $json | ConvertFrom-Json
     $name = "wrapper-$($pin.VERSION)-windows-x86_64.zip"
