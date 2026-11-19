@@ -333,6 +333,9 @@ def build_pages(qt_app, core):
         elif key == "youtube":
             from qtui.youtube import YoutubePage
             widget = YoutubePage(core)
+        elif key in ("qq", "netease"):
+            from qtui.music import MusicPage
+            widget = MusicPage(core, key)
         elif key == "settings":
             widget = SettingsPage(qt_app, settings.load().get("dark_mode", False))
         else:

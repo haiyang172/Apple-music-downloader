@@ -70,6 +70,26 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     yt_task = [t for t in window.core.list_tasks() if t.url == "https://www.youtube.com/watch?v=abcdefghijk"]
     assert len(yt_task) == 1 and yt_task[0].source == "youtube" and yt_task[0].state == "pending"
 
-    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube page passed.")
+    # QQ music page search + enqueue via fixture.
+    import qq_catalog
+    song_fixture = {"source": "qq", "title": "测试歌手", "total": 1, "rows": [
+        {"position": 1, "title": "测试歌曲", "artist": "测试歌手", "album": "测试专辑",
+         "duration": 90, "url": "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"}]}
+    with patch.object(qq_catalog, "search_songs", return_value=song_fixture):
+        window.show_page("qq")
+        page = window.pages["qq"]
+        page.entry.setText("测试歌曲")
+        page.resolve()
+        deadline = time.monotonic() + 15
+        while page.busy and time.monotonic() < deadline:
+            page.poll()
+            time.sleep(0.02)
+        assert len(page.rows) == 1 and page.rows[0]["title"] == "测试歌曲"
+        page.table.selectRow(0)
+        page.enqueue(False)
+    qq_task = [t for t in window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV"]
+    assert len(qq_task) == 1 and qq_task[0].source == "qq" and qq_task[0].state == "pending"
+
+    print("Qt shell smoke OK: nav, queue page, theme toggle, local conversion, YouTube and QQ music pages passed.")
     window.core.close()
     window.close()
