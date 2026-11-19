@@ -1551,7 +1551,7 @@ try:
     netease._enqueue(True)
     wait_for(window, lambda: not app.busy)
     song = app.queue_store.get(song.id)
-    assert song.state == "failed" and "登录" in song.error and song.files == []
+    assert song.state == "failed" and "登录" in song.error and not song.files
 
     netease_account = netease.account
     netease_session = NeteaseSession(12345, (("MUSIC_U", "isolated-fixture-netease-cookie"),))
