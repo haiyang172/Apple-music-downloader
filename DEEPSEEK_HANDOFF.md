@@ -89,7 +89,7 @@ v0.3.38 安装包 SHA-256 为 `af4468ea5198022e99bfc92825802ef64760886f185892841
 ## 2026-11-20 开发轮（v0.3.40 进行中）
 
 - **网易云修复。** 2026 年网易云下线了匿名取流（`outer/url` 全量 404、匿名 weapi 无地址），现在未登录下载直接提示「需要登录」。登录请求带官方 `realIP` 参数（国内地址）绕过海外节点风控；播放地址 v1 路由改为现行网页端的 AES-ECB eapi 信封（CNG ECB 已用 FIPS-197 验证），旧 bitrate 路由改为 weapi POST。登录链路 begin/poll 已实测可用，eapi 取流需用户扫码后实测。
-- **Qt 迁移启动。** `StudioQt.py` + `qtui/` 包：左侧导航、浅深主题（持久化到 `dark_mode`）。`qtui/core.py` 复用共享的队列/引擎/登录服务与 `run_tasks` 管线，下载队列页已可操作（开始/取消/移除/刷新、实时状态），本地转码页可加文件、选格式并入队运行；平台浏览/账户/预览/标签编辑仍为占位。`RunQt.cmd` 启动，安装包已集成 PySide6-Essentials 6.12.0（约 210 MB，THIRD_PARTY.md 已记录许可），安装检查用 `QT_QPA_PLATFORM=offscreen` 验证骨架与本地转码。Tkinter 仍是默认界面。
+- **Qt 迁移启动。** `StudioQt.py` + `qtui/` 包：左侧导航、浅深主题（持久化到 `dark_mode`）。`qtui/core.py` 复用共享的队列/引擎/登录服务与 `run_tasks` 管线，下载队列页已可操作（开始/取消/移除/刷新、实时状态），本地转码页可加文件、选格式并入队运行，标签编辑已迁移（`qtui/tag_editor.py` 复用 `TagEditStore`，读/改/撤销/中断恢复）。平台浏览/账户/预览仍为占位。`RunQt.cmd` 启动，安装包已集成 PySide6-Essentials 6.12.0（约 210 MB，THIRD_PARTY.md 已记录许可），安装检查用 `QT_QPA_PLATFORM=offscreen` 验证骨架、本地转码与标签编辑。Tkinter 仍是默认界面。
 - **Tkinter 增强。** 窗口大小/位置/最大化状态在关闭时保存、启动时恢复；一批任务结束且窗口不在前台时任务栏闪烁加提示音（`notify_done` 设置）；**深色模式**：设置页勾选「深色模式」后下次启动切换深色调色板（与 Qt 壳共享 `dark_mode` 键）。
 - **歌单追更。** [playlist_watch.py](playlist_watch.py) 按批次保存已见曲目日志；QQ/网易云歌单页新增「追更新歌」按钮只入队新增曲目，普通入队自动更新日志。
 - **曲库去重审阅。** [dedup_review.py](dedup_review.py) + [dedup_review_ui.py](dedup_review_ui.py)：本地转码页头「去重审阅」扫描目录，按内容完全一致分组，默认保留每组一个、其余标记删除，删除前复核指纹、被改动的文件跳过。
