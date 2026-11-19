@@ -66,6 +66,7 @@ from youtube_download import resolve_youtube
 
 
 QUALITY = {"AAC": "AAC-LC · 兼容", "ALAC": "ALAC · 无损", "ATMOS": "Dolby Atmos"}
+UI_MODES = {"tkinter": "Tkinter（经典界面）", "qt": "Qt（新界面）"}
 BILI_FORMATS = {"video": "视频 · MP4", "audio": "音频 · M4A", "flac": "音频 · 原始 FLAC", "mp3": "音频 · MP3"}
 YOUTUBE_FORMATS = {"video": "视频 · MP4", "audio": "音频 · M4A", "mp3": "音频 · MP3"}
 MUSIC_SOURCE_QUALITIES = {
@@ -1401,6 +1402,17 @@ class Studio:
                         command=self.save_preferences, style="Card.TCheckbutton").grid(row=1, column=0, sticky="w")
         self.label(appearance, "与 Qt 新界面共享同一主题设置。", muted=True).grid(
             row=2, column=0, sticky="w", pady=(4, 0))
+        launcher = ttk.Frame(appearance, style="Card.TFrame")
+        launcher.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        launcher.columnconfigure(1, weight=1)
+        self.label(launcher, "启动界面").grid(row=0, column=0, sticky="w")
+        self.ui_mode_label = tk.StringVar(page, UI_MODES.get(self.fields["ui_mode"].get(), UI_MODES["qt"]))
+        ui_mode_box = ttk.Combobox(launcher, values=list(UI_MODES.values()), textvariable=self.ui_mode_label,
+                                   state="readonly", width=20)
+        ui_mode_box.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ui_mode_box.bind("<<ComboboxSelected>>", self._ui_mode_changed)
+        self.label(launcher, "下次启动生效；Qt 新界面缺少部分队列细节时可切回 Tkinter。", muted=True).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         updates = self.card(page, 4)
         updates.columnconfigure(0, weight=1)
@@ -1793,6 +1805,11 @@ class Studio:
             self.status.set("设置已保存")
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法保存设置", error)
+
+    def _ui_mode_changed(self, _event=None):
+        key = next((name for name, label in UI_MODES.items() if label == self.ui_mode_label.get()), "qt")
+        self.fields["ui_mode"].set(key)
+        self.save_preferences()
 
     def browse_folder(self):
         old = self.fields["folder"].get()
@@ -2375,8 +2392,23 @@ class Studio:
         self.pump_timer = self.window.after(80, self.pump)
 
 
+def _launch_ui():
+    """Return the configured launch interface: 'qt' (default) or 'tkinter'."""
+    try:
+        mode = settings.load().get("ui_mode", "qt")
+    except (OSError, ValueError):
+        return "tkinter"
+    return "qt" if mode == "qt" else "tkinter"
+
+
 def main():
     configure_windows()
+    if _launch_ui() == "qt":
+        try:
+            import StudioQt
+            return StudioQt.main()
+        except (ImportError, OSError, RuntimeError):
+            pass
     window = tk.Tk()
     window.withdraw()
     try:

@@ -307,6 +307,15 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     saved = settings.load()
     assert (saved["folder"], saved["category"], saved["output"], saved["mp3_bitrate"]) == (
         scratch, "测试分类", "mp3", 192)
+    assert saved["ui_mode"] == "qt"
+
+    # Launch dispatch defaults to Qt and can switch to Tkinter.
+    import Studio
+    assert Studio._launch_ui() == "qt"
+    settings.save({**settings.load(), "ui_mode": "tkinter"})
+    assert Studio._launch_ui() == "tkinter"
+    settings.save({**settings.load(), "ui_mode": "qt"})
+    assert Studio._launch_ui() == "qt"
 
     print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists, favorites, Apple login, library and settings passed.")
     window.core.close()

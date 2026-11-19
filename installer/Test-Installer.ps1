@@ -3084,6 +3084,13 @@ qt_saved = settings.load()
 assert (qt_saved["folder"], qt_saved["category"], qt_saved["output"], qt_saved["mp3_bitrate"]) == (
     str(profile), "测试分类", "mp3", 192)
 
+# 启动分发默认 Qt，可切回 Tkinter。
+assert Studio._launch_ui() == "qt"
+settings.save({**settings.load(), "ui_mode": "tkinter"})
+assert Studio._launch_ui() == "tkinter"
+settings.save({**settings.load(), "ui_mode": "qt"})
+assert Studio._launch_ui() == "qt"
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")

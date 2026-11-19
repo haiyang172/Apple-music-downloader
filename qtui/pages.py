@@ -30,6 +30,7 @@ MUSIC_QUALITIES = {
     "netease": {"auto": "自动 · 最佳可用", "128": "标准", "192": "较高", "320": "极高",
                 "flac": "无损", "hires": "Hi-Res · 无损"},
 }
+UI_MODES = {"tkinter": "Tkinter（经典界面）", "qt": "Qt（新界面）"}
 
 PAGES = (
     ("music", "Apple Music"),
@@ -367,6 +368,11 @@ class SettingsPage(QWidget):
         theme_row.addStretch(1)
         form.addLayout(theme_row)
 
+        self.ui_mode = QComboBox()
+        self.ui_mode.addItems(list(UI_MODES.values()))
+        self.ui_mode.setCurrentText(UI_MODES.get(self.preferences.get("ui_mode", "qt"), UI_MODES["qt"]))
+        form.addLayout(self._row("启动界面", self.ui_mode))
+
         save_row = QHBoxLayout()
         save_row.addStretch(1)
         self.save_button = QPushButton("保存设置")
@@ -414,6 +420,8 @@ class SettingsPage(QWidget):
                                     if label == self.bili_format.currentText()), "video")
         values["youtube_mode"] = next((key for key, label in YOUTUBE_FORMATS.items()
                                        if label == self.youtube_format.currentText()), "video")
+        values["ui_mode"] = next((key for key, label in UI_MODES.items()
+                                  if label == self.ui_mode.currentText()), "qt")
         settings.save(values)
         self.status_message = "设置已保存"
 
