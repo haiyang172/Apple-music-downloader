@@ -27,6 +27,9 @@ class ApplePage(QWidget):
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
         header.addWidget(title)
         header.addStretch(1)
+        self.account_button = QPushButton("账户")
+        self.account_button.clicked.connect(self.open_account)
+        header.addWidget(self.account_button)
         layout.addLayout(header)
 
         bar = QHBoxLayout()
@@ -70,6 +73,11 @@ class ApplePage(QWidget):
         self.timer.timeout.connect(self.poll)
         self.timer.start()
         self._refresh()
+
+    def open_account(self):
+        from qtui.apple_account import AppleAccountDialog
+        dialog = AppleAccountDialog(self, self.core)
+        dialog.exec()
 
     def resolve(self):
         term = self.entry.text().strip()

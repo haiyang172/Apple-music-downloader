@@ -258,6 +258,22 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     fav_task = [t for t in window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1yy411c7mE?p=1"]
     assert len(fav_task) == 1 and fav_task[0].source == "bilibili" and fav_task[0].state == "pending"
 
-    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists and favorites passed.")
+    # Apple account dialog: login form drives the shared LoginService.
+    from login_service import LoginService
+    from qtui.apple_account import AppleAccountDialog
+    with patch.object(LoginService, "status", return_value={"running": True, "logged_in": False}), \
+         patch.object(LoginService, "login", return_value={"logged_in": True, "needs_code": False}):
+        ap_dialog = AppleAccountDialog(window, window.core)
+        ap_dialog.username.setText("test@example.com")
+        ap_dialog.password.setText("secret")
+        ap_dialog.login()
+        deadline = time.monotonic() + 15
+        while ap_dialog.busy and time.monotonic() < deadline:
+            ap_dialog.poll()
+            time.sleep(0.02)
+        assert "已登录" in ap_dialog.status.text()
+        ap_dialog.close()
+
+    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists, favorites and Apple login passed.")
     window.core.close()
     window.close()

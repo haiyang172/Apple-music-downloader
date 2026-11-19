@@ -3035,6 +3035,22 @@ with patch.object(BiliAuth, "load", return_value=bili_session2), \
 fav_task = [t for t in qt_window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1yy411c7mE?p=1"]
 assert len(fav_task) == 1 and fav_task[0].source == "bilibili" and fav_task[0].state == "pending"
 
+# Qt Apple 账户表单：登录表单驱动共享 LoginService。
+from login_service import LoginService
+from qtui.apple_account import AppleAccountDialog
+with patch.object(LoginService, "status", return_value={"running": True, "logged_in": False}), \
+     patch.object(LoginService, "login", return_value={"logged_in": True, "needs_code": False}):
+    ap_dialog = AppleAccountDialog(qt_window, qt_window.core)
+    ap_dialog.username.setText("test@example.com")
+    ap_dialog.password.setText("secret")
+    ap_dialog.login()
+    deadline = time.monotonic() + 15
+    while ap_dialog.busy and time.monotonic() < deadline:
+        ap_dialog.poll()
+        time.sleep(0.02)
+    assert "已登录" in ap_dialog.status.text()
+    ap_dialog.close()
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")
