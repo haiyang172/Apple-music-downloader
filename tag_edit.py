@@ -455,7 +455,8 @@ def _edit(path, changes):
         track.save(path)
     else:
         for key, text in changes.items():
-            tags.pop(key, None)
+            if key in tags:
+                del tags[key]
             if text:
                 if key == "tracknumber" and "/" in text:
                     number, total = text.split("/")
@@ -482,10 +483,11 @@ class TagEditStore:
 
     def _directory(self):
         for path in (*reversed(self.directory.parents), self.directory):
-            try:
-                path.mkdir()
-            except FileExistsError:
-                pass
+            if not path.exists():
+                try:
+                    path.mkdir()
+                except FileExistsError:
+                    pass
             _plain_directory(path)
 
     @contextmanager
@@ -799,3 +801,9 @@ class TagEditStore:
             if not self._restore(record, undo=True):
                 raise TagEditConflict("部分文件在撤销期间发生变化，未覆盖；请检查历史记录。", record)
             return record
+
+    def recover(self, stop=None, on_status=None):
+        """Finish interrupted apply/undo rollback and mark abandoned prepares failed."""
+        _notify(on_status, "正在检查并恢复中断的标签批次…")
+        with self._locked():
+            return self._history(recover=True, stop=stop)

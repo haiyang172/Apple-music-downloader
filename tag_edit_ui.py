@@ -15,9 +15,11 @@ FIELDS = {
     "date": "年份", "tracknumber": "音轨",
 }
 STATES = {
+    "applying": "写入中断", "undoing": "撤销中断", "preparing": "准备中断",
     "applied": "已修改", "undone": "已撤销", "cancelled": "已取消",
     "rolled_back": "已还原", "failed": "未完成", "conflict": "文件已变化",
 }
+RECOVERABLE = ("applying", "undoing", "preparing")
 SUPPORTED = frozenset((".mp3", ".m4a", ".flac", ".wav", ".opus"))
 
 
@@ -67,6 +69,9 @@ class TagEditor:
         self.apply_button.grid(row=1, column=2, columnspan=2, sticky="e", padx=(8, 0))
         self.undo_button = app.action(actions, "撤销所选批次", self.undo, primary=True)
         self.undo_button.grid(row=1, column=2, columnspan=2, sticky="e", padx=(8, 0))
+        self.recover_button = app.action(actions, "恢复中断批次", self.recover, primary=True)
+        self.recover_button.grid(row=1, column=2, columnspan=2, sticky="e", padx=(8, 0))
+        self.recover_button.grid_remove()
         self._refresh_controls()
         self.layout.show()
         self.poll_timer = self.window.after(80, self.poll)
@@ -174,6 +179,11 @@ class TagEditor:
             self.history_detail.set(str(record["error"]))
         elif record.get("state") == "applied":
             self.history_detail.set("可还原此批次的原文件。若文件在修改后再次变化，撤销会停止以保护现有内容。")
+        elif record.get("state") in RECOVERABLE:
+            if record.get("state") == "preparing":
+                self.history_detail.set("上次操作在准备期间中断，原文件未修改。恢复会把该批次标记为未完成。")
+            else:
+                self.history_detail.set("上次操作在写入或撤销期间中断。恢复会从备份还原原文件，并保护期间的后续更改。")
         else:
             self.history_detail.set("此批次当前无法撤销。")
         self._refresh_controls()
@@ -195,13 +205,20 @@ class TagEditor:
                                     state="normal" if editable and any(value.get() for value in self.enabled.values()) else "disabled")
         selected_history = self.history_tree.selection()
         record = self.history.get(selected_history[0]) if selected_history else None
-        self.undo_button.configure(state="normal" if not self.busy and not self.scanning and not self.history_loading
-                                   and record and record.get("state") == "applied" else "disabled")
+        idle = not self.busy and not self.scanning and not self.history_loading
+        self.undo_button.configure(state="normal" if idle and record and record.get("state") == "applied" else "disabled")
+        self.recover_button.configure(state="normal" if idle and record and record.get("state") in RECOVERABLE else "disabled")
         if self.notebook.select() == str(self.history_page):
             self.apply_button.grid_remove()
-            self.undo_button.grid()
+            if record and record.get("state") in RECOVERABLE:
+                self.undo_button.grid_remove()
+                self.recover_button.grid()
+            else:
+                self.recover_button.grid_remove()
+                self.undo_button.grid()
         else:
             self.undo_button.grid_remove()
+            self.recover_button.grid_remove()
             self.apply_button.grid()
 
     def choose_files(self):
@@ -302,6 +319,14 @@ class TagEditor:
         if record and record.get("state") == "applied":
             self._write("undo", record["id"])
 
+    def recover(self):
+        if self.closed or self.busy or self.scanning or self.history_loading:
+            return
+        selected = self.history_tree.selection()
+        record = self.history.get(selected[0]) if selected else None
+        if record and record.get("state") in RECOVERABLE:
+            self._write("recover", None)
+
     def _write(self, operation, payload):
         self.serial += 1
         self.history_stop.set()
@@ -309,13 +334,18 @@ class TagEditor:
         self.busy = True
         self.stop = stop = threading.Event()
         store, messages, serial = self.store, self.messages, self.serial
-        self.status.set("正在修改标签并保存备份…" if operation == "apply" else "正在从备份还原原文件…")
+        self.status.set({"apply": "正在修改标签并保存备份…",
+                         "undo": "正在从备份还原原文件…",
+                         "recover": "正在检查并恢复中断的标签批次…"}.get(operation, "正在处理…"))
         self._refresh_controls()
 
         def run():
             try:
                 status = lambda value: messages.put((serial, "status", str(value)))
-                result = getattr(store, operation)(payload, stop=stop, on_status=status)
+                if operation == "recover":
+                    result = store.recover(stop=stop, on_status=status)
+                else:
+                    result = getattr(store, operation)(payload, stop=stop, on_status=status)
                 messages.put((serial, "write_done", (operation, result, "")))
             except Exception as error:
                 message = str(error) or ("操作已取消。" if stop.is_set() else "无法完成标签修改。")
@@ -349,7 +379,8 @@ class TagEditor:
                                              STATES.get(record.get("state"), record.get("state", "—")), batch[:10]))
         selected = previous if previous in self.history else next(
             (batch for batch, record in self.history.items() if record.get("state") == "applied"),
-            next(iter(self.history), None))
+            next((batch for batch, record in self.history.items() if record.get("state") in RECOVERABLE),
+                 next(iter(self.history), None)))
         if selected:
             self.history_tree.selection_set(selected)
         self._history_selected()
@@ -397,6 +428,11 @@ class TagEditor:
                     return
                 if error:
                     message = error
+                elif operation == "recover":
+                    interrupted = [item for item in (record or [])
+                                   if item.get("state") in RECOVERABLE]
+                    message = ("仍有批次无法恢复，请检查历史状态。" if interrupted
+                               else "中断批次已恢复，原文件已还原。")
                 else:
                     count = len((record or {}).get("items") or [])
                     state = (record or {}).get("state")

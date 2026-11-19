@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Setup
@@ -2410,6 +2410,306 @@ try:
 finally:
     app.close()
 print("Local tag editor applied only checked fields and reopened persistent history to undo without renaming the file.")
+
+import json
+import threading
+import mutagen
+
+extra_folder = profile / "音频标签扩展"
+extra_folder.mkdir()
+cover_image = root / "assets/amdl-32.png"
+assert cover_image.is_file()
+
+
+def decoded_audio(path):
+    command = [str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(path),
+               "-map", "0:a:0", "-f", "s24le", "-acodec", "pcm_s24le", "-"]
+    return subprocess.run(command, capture_output=True, check=True, timeout=20,
+                          creationflags=subprocess.CREATE_NO_WINDOW).stdout
+
+
+def make_audio(path, codec):
+    subprocess.run([str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(audio),
+                    "-c:a", codec, str(path)], check=True, timeout=20,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+
+# 无标签文件：不存在的字段保持为空，写入后音频数据不变，撤销逐字节还原。
+bare = extra_folder / "无标签.mp3"
+make_audio(bare, "libmp3lame")
+bare_before, bare_wave = bare.read_bytes(), decoded_audio(bare)
+bare_info = tag_store.read_audio(bare)
+assert bare_info["title"] == "" and bare_info["artist"] == "" and bare_info["codec"] == "MP3"
+bare_record = tag_store.apply([{"path": str(bare), "expected": bare_info["fingerprint"],
+                                "changes": {"title": "无标签中文歌名"}}])
+assert bare_record["state"] == "applied"
+bare_info = tag_store.read_audio(bare)
+assert bare_info["title"] == "无标签中文歌名" and bare_info["artist"] == "" and bare_info["codec"] == "MP3"
+assert decoded_audio(bare) == bare_wave
+assert tag_store.undo(bare_record["id"])["state"] == "undone" and bare.read_bytes() == bare_before
+
+# 单字段清除：勾选歌手留空只删除该字段，歌名保留，撤销还原。
+cleared = extra_folder / "清空字段.flac"
+make_audio(cleared, "flac")
+write_music_tags(cleared, "保留歌名", "待清除歌手")
+cleared_before = cleared.read_bytes()
+cleared_record = tag_store.apply([{"path": str(cleared), "changes": {"artist": ""}}])
+assert cleared_record["state"] == "applied"
+cleared_info = tag_store.read_audio(cleared)
+assert cleared_info["title"] == "保留歌名" and cleared_info["artist"] == ""
+assert tag_store.undo(cleared_record["id"])["state"] == "undone" and cleared.read_bytes() == cleared_before
+
+# 封面、歌词、无关标签与 ID3 版本：v2.3 和 v2.4 MP3 以及 WAV 修改后全部保留。
+for name, version in (("v23", (2, 3)), ("v24", (2, 4))):
+    rich = extra_folder / ("丰富标签." + name + ".mp3")
+    make_audio(rich, "libmp3lame")
+    write_music_tags(rich, "封面歌名", "封面歌手", cover=cover_image, lyrics="[00:00.00]测试歌词")
+    track = mutagen.File(rich)
+    if version == (2, 3):
+        track.tags.update_to_v23()
+    else:
+        track.tags.update_to_v24()
+    track.tags.add(mutagen.id3.TCOM(encoding=3, text=["保留作曲家"]))
+    track.save(v2_version=version[1])
+    assert mutagen.File(rich).tags.version[:2] == version
+    cover_before = bytes(next(picture.data for picture in mutagen.File(rich).tags.getall("APIC")
+                              if picture.type == mutagen.id3.PictureType.COVER_FRONT))
+    lyrics_before = str(mutagen.File(rich).tags.getall("USLT")[0])
+    wave_before = decoded_audio(rich)
+    rich_before = rich.read_bytes()
+    record = tag_store.apply([{"path": str(rich), "changes": {"artist": "更换歌手", "genre": "测试流派"}}])
+    assert record["state"] == "applied" and mutagen.File(rich).tags.version[:2] == version
+    assert bytes(next(picture.data for picture in mutagen.File(rich).tags.getall("APIC")
+                      if picture.type == mutagen.id3.PictureType.COVER_FRONT)) == cover_before
+    assert str(mutagen.File(rich).tags.getall("USLT")[0]) == lyrics_before
+    assert str(mutagen.File(rich).tags.getall("TCOM")[0]) == "保留作曲家"
+    assert decoded_audio(rich) == wave_before
+    assert tag_store.undo(record["id"])["state"] == "undone" and rich.read_bytes() == rich_before
+
+rich = extra_folder / "丰富标签.wav"
+make_audio(rich, "pcm_s24le")
+write_music_tags(rich, "封面歌名", "封面歌手", cover=cover_image, lyrics="[00:00.00]测试歌词")
+track = mutagen.File(rich)
+assert track.tags.version[:2] == (2, 4)
+track.tags.add(mutagen.id3.TCOM(encoding=3, text=["保留作曲家"]))
+track.save()
+cover_before = bytes(next(picture.data for picture in mutagen.File(rich).tags.getall("APIC")
+                          if picture.type == mutagen.id3.PictureType.COVER_FRONT))
+lyrics_before = str(mutagen.File(rich).tags.getall("USLT")[0])
+wave_before = decoded_audio(rich)
+rich_before = rich.read_bytes()
+record = tag_store.apply([{"path": str(rich), "changes": {"artist": "更换歌手", "genre": "测试流派"}}])
+assert record["state"] == "applied" and mutagen.File(rich).tags.version[:2] == (2, 4)
+assert bytes(next(picture.data for picture in mutagen.File(rich).tags.getall("APIC")
+                  if picture.type == mutagen.id3.PictureType.COVER_FRONT)) == cover_before
+assert str(mutagen.File(rich).tags.getall("USLT")[0]) == lyrics_before
+assert str(mutagen.File(rich).tags.getall("TCOM")[0]) == "保留作曲家"
+assert decoded_audio(rich) == wave_before
+assert tag_store.undo(record["id"])["state"] == "undone" and rich.read_bytes() == rich_before
+
+for name, codec, unrelated in (("flac", "flac", "comment"), ("m4a", "aac", "\xa9cmt"), ("opus", "libopus", "comment")):
+    rich = extra_folder / ("丰富标签." + name)
+    make_audio(rich, codec)
+    write_music_tags(rich, "封面歌名", "封面歌手", cover=cover_image, lyrics="[00:00.00]测试歌词")
+    track = mutagen.File(rich)
+    track[unrelated] = ["保留注释"]
+    track.save()
+    lyrics_key = "\xa9lyr" if name == "m4a" else "lyrics"
+    if name == "flac":
+        cover_before = bytes(mutagen.File(rich).pictures[0].data)
+    elif name == "m4a":
+        cover_before = bytes(mutagen.File(rich)["covr"][0])
+    else:
+        cover_before = list(mutagen.File(rich)["metadata_block_picture"])
+    lyrics_before = str(mutagen.File(rich)[lyrics_key][0])
+    wave_before = decoded_audio(rich)
+    rich_before = rich.read_bytes()
+    record = tag_store.apply([{"path": str(rich), "changes": {"artist": "更换歌手", "genre": "测试流派"}}])
+    assert record["state"] == "applied"
+    if name == "flac":
+        assert bytes(mutagen.File(rich).pictures[0].data) == cover_before
+    elif name == "m4a":
+        assert bytes(mutagen.File(rich)["covr"][0]) == cover_before
+    else:
+        assert list(mutagen.File(rich)["metadata_block_picture"]) == cover_before
+    assert str(mutagen.File(rich)[lyrics_key][0]) == lyrics_before
+    assert str(mutagen.File(rich)[unrelated][0]) == "保留注释"
+    assert decoded_audio(rich) == wave_before
+    assert tag_store.undo(record["id"])["state"] == "undone" and rich.read_bytes() == rich_before
+print("Cover art, lyrics, unrelated tags, ID3 versions and decoded audio survived five tag edits; untagged files and single-field clearing passed.")
+
+# 外部改写保护：预览后改动文件时应用必须拒绝且不覆盖后续更改。
+external = extra_folder / "外部改写.mp3"
+make_audio(external, "libmp3lame")
+write_music_tags(external, "外部歌名", "外部歌手")
+external_info = tag_store.read_audio(external)
+with external.open("ab") as stream:
+    stream.write(b"EXTERNAL")
+external_changed = external.read_bytes()
+try:
+    tag_store.apply([{"path": str(external), "expected": external_info["fingerprint"],
+                      "changes": {"artist": "不应写入"}}])
+    raise AssertionError("expected fingerprint 应拒绝外部改写后的文件")
+except tag_edit.TagEditConflict:
+    pass
+assert external.read_bytes() == external_changed
+
+# 已应用批次在撤销前被外部改写：撤销停止并标记冲突，外部内容保持原样。
+external_record = tag_store.apply([{"path": str(external), "changes": {"artist": "已应用歌手"}}])
+assert external_record["state"] == "applied"
+with external.open("ab") as stream:
+    stream.write(b"LATER")
+external_changed = external.read_bytes()
+try:
+    tag_store.undo(external_record["id"])
+    raise AssertionError("撤销应拒绝被外部改写的文件")
+except tag_edit.TagEditConflict:
+    pass
+assert external.read_bytes() == external_changed
+history = {item["id"]: item for item in tag_store.list_history()}
+assert history[external_record["id"]]["state"] == "conflict"
+print("External edits are never overwritten; apply and undo both stop with a conflict.")
+
+# 中途取消：准备阶段取消不动原文件，写入阶段取消回滚全部文件。
+cancel_files = []
+for index in range(4):
+    path = extra_folder / f"取消{index}.m4a"
+    make_audio(path, "aac")
+    write_music_tags(path, f"取消歌名{index}", "取消歌手")
+    cancel_files.append(path)
+cancel_before = {path: path.read_bytes() for path in cancel_files}
+cancel_stop = threading.Event()
+try:
+    tag_store.apply([{"path": str(path), "changes": {"album": "取消专辑"}} for path in cancel_files],
+                    stop=cancel_stop,
+                    on_status=lambda status: cancel_stop.set() if status.startswith("正在准备标签 · 2") else None)
+    raise AssertionError("准备阶段取消应抛出 Cancelled")
+except tag_edit.Cancelled:
+    pass
+assert all(path.read_bytes() == cancel_before[path] for path in cancel_files)
+cancel_matching = [item for item in tag_store.list_history()
+                   if {entry["path"] for entry in item["items"]} == {str(path) for path in cancel_files}]
+assert any(item["state"] == "cancelled" for item in cancel_matching)
+cancel_stop = threading.Event()
+try:
+    tag_store.apply([{"path": str(path), "changes": {"album": "取消专辑"}} for path in cancel_files],
+                    stop=cancel_stop,
+                    on_status=lambda status: cancel_stop.set() if status.startswith("正在保存标签 · 2") else None)
+    raise AssertionError("写入阶段取消应抛出 Cancelled")
+except tag_edit.Cancelled:
+    pass
+assert all(path.read_bytes() == cancel_before[path] for path in cancel_files)
+cancel_matching = [item for item in tag_store.list_history()
+                   if {entry["path"] for entry in item["items"]} == {str(path) for path in cancel_files}]
+assert {item["state"] for item in cancel_matching} == {"cancelled", "rolled_back"}
+print("Mid-preparation and mid-install cancellation left every original byte intact.")
+
+# 中断批次恢复：模拟写入/撤销中途崩溃，恢复必须还原原文件并保护外部更改。
+pair = [extra_folder / "中断A.flac", extra_folder / "中断B.flac"]
+for path in pair:
+    make_audio(path, "flac")
+    write_music_tags(path, path.stem, "中断歌手")
+pair_before = {path: path.read_bytes() for path in pair}
+record = tag_store.apply([{"path": str(path), "changes": {"genre": "中断流派"}} for path in pair])
+assert record["state"] == "applied"
+folder = tag_store.directory / record["id"]
+journal = json.loads((folder / "journal.json").read_text(encoding="utf-8"))
+journal["state"] = "applying"
+(folder / "journal.json").write_text(json.dumps(journal, ensure_ascii=False), encoding="utf-8")
+Path(record["items"][0]["path"]).write_bytes((folder / record["items"][0]["staged"]).read_bytes())
+states = {item["id"]: item["state"] for item in tag_store.recover()}
+assert states[record["id"]] == "rolled_back"
+assert all(path.read_bytes() == pair_before[path] for path in pair)
+record = tag_store.apply([{"path": str(path), "changes": {"genre": "撤销中断流派"}} for path in pair])
+folder = tag_store.directory / record["id"]
+journal = json.loads((folder / "journal.json").read_text(encoding="utf-8"))
+journal["state"] = "undoing"
+(folder / "journal.json").write_text(json.dumps(journal, ensure_ascii=False), encoding="utf-8")
+Path(record["items"][0]["path"]).write_bytes((folder / record["items"][0]["backup"]).read_bytes())
+states = {item["id"]: item["state"] for item in tag_store.recover()}
+assert states[record["id"]] == "undone"
+assert all(path.read_bytes() == pair_before[path] for path in pair)
+record = tag_store.apply([{"path": str(path), "changes": {"genre": "冲突流派"}} for path in pair])
+folder = tag_store.directory / record["id"]
+journal = json.loads((folder / "journal.json").read_text(encoding="utf-8"))
+journal["state"] = "applying"
+(folder / "journal.json").write_text(json.dumps(journal, ensure_ascii=False), encoding="utf-8")
+foreign = (folder / record["items"][0]["staged"]).read_bytes() + b"FOREIGN"
+Path(record["items"][0]["path"]).write_bytes(foreign)
+states = {item["id"]: item["state"] for item in tag_store.recover()}
+assert states[record["id"]] == "conflict"
+assert Path(record["items"][0]["path"]).read_bytes() == foreign
+assert Path(record["items"][1]["path"]).read_bytes() == pair_before[pair[1]]
+print("Interrupted apply, interrupted undo and external edits during recovery were handled safely.")
+
+# 界面恢复入口：历史页「写入中断」批次可通过「恢复中断批次」按钮还原。
+ui_store = tag_edit.TagEditStore(settings.DATA / "tag-edits")
+ui_pair = [extra_folder / "界面恢复.m4a", extra_folder / "界面恢复.flac"]
+for path in ui_pair:
+    make_audio(path, "aac" if path.suffix == ".m4a" else "flac")
+    write_music_tags(path, path.stem, "恢复歌手")
+ui_before = {path: path.read_bytes() for path in ui_pair}
+ui_record = ui_store.apply([{"path": str(path), "changes": {"album": "恢复专辑"}} for path in ui_pair])
+assert ui_record["state"] == "applied"
+ui_folder = ui_store.directory / ui_record["id"]
+ui_journal = json.loads((ui_folder / "journal.json").read_text(encoding="utf-8"))
+ui_journal["state"] = "applying"
+(ui_folder / "journal.json").write_text(json.dumps(ui_journal, ensure_ascii=False), encoding="utf-8")
+Path(ui_record["items"][0]["path"]).write_bytes((ui_folder / ui_record["items"][0]["staged"]).read_bytes())
+window, app = new_window()
+try:
+    app.edit_audio_tags()
+    editor = app.tag_editor_dialog
+    wait_for(window, lambda: not editor.history_loading)
+    editor.notebook.select(editor.history_page)
+    assert ui_record["id"] in editor.history
+    editor.history_tree.selection_set(ui_record["id"])
+    editor._history_selected()
+    wait_for(window, lambda: str(editor.recover_button.cget("state")) == "normal")
+    assert editor.history_tree.set(ui_record["id"], "state") == "写入中断"
+    assert "恢复" in editor.history_detail.get()
+    editor.recover_button.invoke()
+    wait_for(window, lambda: not editor.busy and not editor.history_loading)
+    assert editor.history[ui_record["id"]]["state"] == "rolled_back"
+    assert editor.history_tree.set(ui_record["id"], "state") == "已还原"
+    assert all(path.read_bytes() == ui_before[path] for path in ui_pair)
+finally:
+    app.close()
+print("The history page recovers interrupted batches with one button and restores exact original bytes.")
+
+# 下载队列入口：已完成任务的音频文件通过右键入口打开同一编辑器并支持撤销。
+window, app = new_window()
+try:
+    queue_source = extra_folder / "队列标签.m4a"
+    make_audio(queue_source, "aac")
+    write_music_tags(queue_source, "队列歌名", "队列歌手")
+    queue_before = queue_source.read_bytes()
+    queue_id = max((int(key) for key in app.tasks), default=0) + 1
+    fake = type("QueueTask", (), {})()
+    fake.id, fake.source, fake.state = queue_id, Studio.SOURCE, "complete"
+    fake.title, fake.artist, fake.batch_title = "队列标签测试", "队列歌手", "标签批次"
+    fake.position, fake.total, fake.files = 1, 1, [str(queue_source)]
+    app.queue_tree.insert("", "end", iid=str(queue_id), values=(fake.title, fake.artist, fake.batch_title, "完成"))
+    app.tasks[queue_id] = fake
+    app.queue_tree.selection_set(str(queue_id))
+    app.edit_saved_tags()
+    editor = app.tag_editor_dialog
+    wait_for(window, lambda: not editor.scanning and not editor.history_loading)
+    assert len(editor.files) == 1 and editor.values["title"].get() == "队列歌名"
+    editor.values["artist"].set("队列新歌手")
+    editor.checks["artist"].invoke()
+    editor.apply_button.invoke()
+    wait_for(window, lambda: not editor.busy and not editor.scanning and not editor.history_loading)
+    assert tag_store.read_audio(queue_source)["artist"] == "队列新歌手"
+    editor.notebook.select(editor.history_page)
+    batch = next(iter(editor.history))
+    editor.history_tree.selection_set(batch)
+    editor._history_selected()
+    editor.undo_button.invoke()
+    wait_for(window, lambda: not editor.busy and not editor.history_loading)
+    assert queue_source.read_bytes() == queue_before
+finally:
+    app.close()
+print("The download queue entry opened the same editor and undid the applied tags byte-for-byte.")
 '@
     $smokeScript = Join-Path $testRoot 'smoke.py'
     [IO.File]::WriteAllText($smokeScript, $smokeCode, [Text.UTF8Encoding]::new($false))

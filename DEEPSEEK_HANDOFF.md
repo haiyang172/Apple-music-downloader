@@ -29,19 +29,33 @@ GitHub 的旧 `main` 与当前产品源码有较大差异。查看这一轮的�
 | [installer/Setup.iss](installer/Setup.iss) | 安装器的默认版本号同步为 0.3.39。 |
 | [README.md](README.md) | 「本地转码」中加入标签编辑使用说明。描述的是开发版本的目标行为，端到端验收状态见下文。 |
 
-## 当前可以复现的问题
+## 当前可以复现的问题 → 本轮已修复（2026-11-19）
 
-1. 在 `D:\AMDL` 运行下面的标签测试。脚本会生成临时音频并使用独立的测试资料目录。2026-11-19 在 D 盘副本中实测，程序能读取五种格式，首次调用 `TagEditStore.apply()` 时失败。
-2. 实际错误为 `PermissionError: [WinError 5] Access is denied: 'C:\\'`。调用链是 `apply → _locked → _directory → path.mkdir()`。源码在 D 盘，但测试资料目录位于 Windows 的临时目录，所以错误中出现 C 盘。当前实现遍历完整父路径时也尝试创建已存在的盘符根，只捕获了 `FileExistsError`。
-3. 接手时先修复普通目录和盘符根的判定，再运行同一条测试。保留对符号链接、目录联接和异常文件的检查；不需要修改系统权限。此失败发生在首次原文件写入之前，五格式写入、重开历史、实际撤销的后续断言尚未跑完。
+1. ~~首次调用 `TagEditStore.apply()` 失败~~ 已修复。`_directory()` 改为先判断路径是否已存在，只对不存在的路径调用 `mkdir()`，盘符根（如 `C:\`）不再触发 `PermissionError: [WinError 5]`。每一级仍执行 `_plain_directory()`，对符号链接、目录联接和异常文件类型的检查全部保留。
+2. ~~`VCommentDict` 报 `TypeError: pop expected at most 1 argument, got 2`~~ 已修复。FLAC/Opus 的 Vorbis 注释继承自 `list`，`list.pop` 覆盖了 `DictMixin.pop`；`_edit()` 的非 MP3/MP4 分支改用 `key in tags` + `del tags[key]`。该错误在 WinError 5 修复后才暴露。
+3. `handoff/Build-Local.ps1` 的 `-CheckOnly` 一行式在 Windows PowerShell 5.1 下内嵌双引号会被剥掉（`SyntaxError`）。已改写为无引号形式（`root.joinpath(sys.argv[2])`），5.1 和 7 均可运行。
+
+## 新增功能与扩展验证
+
+- [tag_edit.py](tag_edit.py) 新增 `TagEditStore.recover()`：在锁内执行 `_history(recover=True)`，完成中断批次的回滚或继续撤销。
+- [tag_edit_ui.py](tag_edit_ui.py) 历史页新增中断状态「写入中断」「撤销中断」「准备中断」，选中这类批次时出现「恢复中断批次」按钮，恢复后刷新历史并还原原文件。
+- [installer/Test-Installer.ps1](installer/Test-Installer.ps1) 标签段扩展了以下用例（`verify_tags.py` 直接执行，已全部通过）：
+  - 无标签文件、单字段清除、中文写入；
+  - 五格式带封面、歌词和无关标签的样本：修改后封面/歌词/无关标签与解码音频逐项比对不变，MP3 核对 ID3 v2.3 与 v2.4 版本、WAV 核对 v2.4；
+  - 外部改写保护：预览后改动文件时 apply 拒绝；已应用批次撤销前被改动时 undo 拒绝并标记 conflict，均不覆盖后续更改；
+  - 中途取消：准备阶段取消不动原文件（cancelled），写入阶段取消回滚全部文件（rolled_back）；
+  - 中断批次：模拟写入中断（applying）、撤销中断（undoing）与恢复期间外部改写三种日志状态，`recover()` 分别还原、完成撤销或标记 conflict；
+  - 界面恢复入口：历史页选中「写入中断」批次，点「恢复中断批次」后原文件逐字节还原；
+  - 下载队列入口：右键路径打开同一编辑器，应用后撤销逐字节还原。
+- [README.md](README.md) 在「本地转码」一节补充中断批次的恢复说明。
+
+复现命令不变：
 
 ```powershell
 Set-Location -LiteralPath 'D:\AMDL'
 .\handoff\Build-Local.ps1 -CheckOnly
 .\runtime\python.exe -I -B .\handoff\verify_tags.py
 ```
-
-`-CheckOnly` 已在 D 盘通过，验证当前源码、Python、Mutagen、Tk、下载后端以及主要构建输入。`verify_tags.py` 直接执行安装包检查脚本内的标签用例，避免使用另一份过时断言。
 
 ## 验收顺序
 
@@ -70,6 +84,8 @@ Set-Location -LiteralPath 'D:\AMDL'
 
 v0.3.38 安装包 SHA-256 为 `af4468ea5198022e99bfc92825802ef64760886f18589284104057623982bb70`。交接时对照原工作区逐文件校验了 88 个源码和资源文件、3,292 个运行和构建文件（含该安装包）。校验清单位于本机 `.git/info/d-drive-handoff-sha256.json`。
 
-## 给 DeepSeek 的第一条任务
+## 给 DeepSeek 的第一条任务（已接手的交接点）
 
 > 请从 D:\AMDL 的 handoff/v0.3.39 分支接手影音下载台。先读 DEEPSEEK_HANDOFF.md，再复现 verify_tags.py 的 WinError 5。修复目录检查，验证五种音频格式的标签修改、外部改写保护和重启后撤销，并补上中断批次的恢复验证。请在临时测试文件上操作，报告实际通过的用例和仍待验证的项目。全部通过后再构建 v0.3.39 候选安装包。
+
+以上内容已于 2026-11-19 完成：两个存储层缺陷修复、`verify_tags.py` 全绿（含新增的中断恢复与双入口用例）、UI 恢复入口上线。剩余项：构建 v0.3.39 候选安装包并运行 `Test-Installer.ps1` 完整安装检查，以及全新 Windows 标准用户安装、覆盖升级、卸载的实机或虚拟机验收。
