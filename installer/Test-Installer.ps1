@@ -2793,6 +2793,41 @@ assert qt_task.files and Path(qt_task.files[0]).suffix == ".mp3" and Path(qt_tas
 qt_window.pages["queue"].refresh()
 assert qt_window.pages["queue"].table.rowCount() == len(app.queue_store.list_tasks())
 
+# Qt 标签编辑：读取、应用字段并撤销还原原文件。
+tag_dir = profile / "qt-tags"
+tag_dir.mkdir()
+tag_file = tag_dir / "界面标签.m4a"
+subprocess.run([str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(audio),
+                "-c:a", "aac", str(tag_file)], check=True, timeout=20,
+               creationflags=subprocess.CREATE_NO_WINDOW)
+write_music_tags(tag_file, "界面歌名", "界面原歌手")
+tag_original = tag_file.read_bytes()
+from qtui.tag_editor import TagEditorDialog
+tag_dialog = TagEditorDialog(qt_window, [str(tag_file)])
+deadline = time.monotonic() + 15
+while tag_dialog.scanning and time.monotonic() < deadline:
+    tag_dialog.poll()
+    time.sleep(0.02)
+assert tag_dialog.files[0]["title"] == "界面歌名"
+tag_dialog.checks["artist"].setChecked(True)
+tag_dialog.entries["artist"].setText("界面新歌手")
+tag_dialog._refresh_controls()
+tag_dialog.apply()
+deadline = time.monotonic() + 30
+while (tag_dialog.busy or tag_dialog.messages) and time.monotonic() < deadline:
+    tag_dialog.poll()
+    time.sleep(0.02)
+assert tag_dialog.store.read_audio(tag_file)["artist"] == "界面新歌手"
+tag_dialog.history_tree.selectRow(0)
+tag_dialog._refresh_controls()
+tag_dialog.undo()
+deadline = time.monotonic() + 30
+while (tag_dialog.busy or tag_dialog.messages) and time.monotonic() < deadline:
+    tag_dialog.poll()
+    time.sleep(0.02)
+assert tag_file.read_bytes() == tag_original
+tag_dialog.close()
+
 qt_window.close()
 qt_window.deleteLater()
 print("The Qt shell booted offscreen with the real queue, navigation, themes and a working local conversion.")

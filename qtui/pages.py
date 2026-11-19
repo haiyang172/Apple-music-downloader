@@ -175,6 +175,9 @@ class LocalPage(QWidget):
         self.add_button = QPushButton("添加文件")
         self.add_button.clicked.connect(self.choose_files)
         toolbar.addWidget(self.add_button)
+        self.tag_button = QPushButton("编辑标签")
+        self.tag_button.clicked.connect(self.open_tag_editor)
+        toolbar.addWidget(self.tag_button)
         self.remove_button = QPushButton("移除所选")
         self.remove_button.clicked.connect(self.remove_selected)
         toolbar.addWidget(self.remove_button)
@@ -214,6 +217,11 @@ class LocalPage(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, "添加本地影音文件")
         if paths:
             self.add_files(paths)
+
+    def open_tag_editor(self):
+        from qtui.tag_editor import TagEditorDialog
+        dialog = TagEditorDialog(self)
+        dialog.exec()
 
     def add_files(self, paths):
         known = {os.path.normcase(path) for path in self.files}
