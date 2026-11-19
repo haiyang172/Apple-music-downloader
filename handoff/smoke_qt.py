@@ -219,6 +219,45 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     qq_priv_task = [t for t in window.core.list_tasks() if t.url == "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qyYhZ"]
     assert len(qq_priv_task) == 1 and qq_priv_task[0].source == "qq" and qq_priv_task[0].state == "pending"
 
-    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview and personal playlists passed.")
+    # Bilibili personal favorites: list, open a folder and enqueue a video.
+    import bili_collections
+    from bili_auth import BiliAuth, BiliSession, BiliAccount
+    bili_session2 = BiliSession((("SESSDATA", "fixture"), ("DedeUserID", "12345")))
+    bili_account = BiliAccount(12345, "测试UP")
+    folder = {"id": "favorite:4242", "collection_id": "4242", "kind": "favorite", "owner_id": "12345",
+              "title": "驾驶音乐", "total": 1, "url": "https://space.bilibili.com/12345/favlist?fid=4242",
+              "_account_id": "12345"}
+    favorites_result = {"source": "bilibili", "view": "favorites", "title": "我的收藏夹", "_account_id": "12345",
+                        "rows": [folder], "total": 1, "complete": True, "warning": ""}
+    folder_result = {"source": "bilibili", "title": "驾驶音乐", "total": 1, "rows": [
+        {"source": "bilibili", "url": "https://www.bilibili.com/video/BV1yy411c7mE?p=1", "cid": 102,
+         "id": "BV1yy411c7mE", "position": 1, "total": 1, "title": "收藏视频", "audio_title": "收藏视频",
+         "artist": "收藏UP", "uploader": "收藏UP", "source_category": "音乐", "media_category": "music",
+         "duration": 90, "batch_key": "bilibili:BV1yy411c7mE", "batch_title": "驾驶音乐"}]}
+    with patch.object(BiliAuth, "load", return_value=bili_session2), \
+         patch.object(BiliAuth, "check", return_value=bili_account), \
+         patch.object(bili_collections, "list_my_favorites", return_value=favorites_result), \
+         patch.object(bili_collections, "resolve_my_favorite", return_value=folder_result):
+        window.show_page("bilibili")
+        bpage = window.pages["bilibili"]
+        bpage.show_favorites()
+        deadline = time.monotonic() + 15
+        while bpage.busy and time.monotonic() < deadline:
+            bpage.poll()
+            time.sleep(0.02)
+        assert bpage.favorites_view and len(bpage.rows) == 1
+        bpage.table.selectRow(0)
+        bpage.open_folder()
+        deadline = time.monotonic() + 15
+        while bpage.busy and time.monotonic() < deadline:
+            bpage.poll()
+            time.sleep(0.02)
+        assert not bpage.favorites_view and len(bpage.rows) == 1 and bpage.rows[0]["audio_title"] == "收藏视频"
+        bpage.table.selectRow(0)
+        bpage.enqueue(False)
+    fav_task = [t for t in window.core.list_tasks() if t.url == "https://www.bilibili.com/video/BV1yy411c7mE?p=1"]
+    assert len(fav_task) == 1 and fav_task[0].source == "bilibili" and fav_task[0].state == "pending"
+
+    print("Qt shell smoke OK: nav, queue, theme, local conversion, YouTube, QQ, Bilibili, Apple, account, preview, playlists and favorites passed.")
     window.core.close()
     window.close()
