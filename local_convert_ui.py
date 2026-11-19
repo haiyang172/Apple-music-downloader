@@ -29,6 +29,7 @@ class LocalConverter:
         app.label(header, "本地转码", large=True, background=app.background).grid(row=0, column=0, sticky="w")
         app.action(header, "添加文件", self.choose_files).grid(row=0, column=1, padx=(8, 0))
         app.action(header, "编辑标签", self.edit_tags).grid(row=0, column=2, padx=(8, 0))
+        app.action(header, "去重审阅", lambda: self.app.open_dedup_review()).grid(row=0, column=3, padx=(8, 0))
 
         card = app.panel(page)
         card.grid(row=1, column=0, sticky="nsew")

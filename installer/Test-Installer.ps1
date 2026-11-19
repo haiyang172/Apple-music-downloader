@@ -2728,6 +2728,37 @@ finally:
     app.close()
 print("The download queue entry opened the same editor and undid the applied tags byte-for-byte.")
 
+# 曲库去重审阅：扫描出内容完全一致的重复文件，删除标记副本并保留其余。
+import shutil
+window, app = new_window()
+try:
+    dedup_dir = profile / "去重测试"
+    (dedup_dir / "sub").mkdir(parents=True)
+    keeper = dedup_dir / "01.m4a"
+    duplicate = dedup_dir / "sub" / "02.m4a"
+    unique = dedup_dir / "唯一.flac"
+    shutil.copyfile(audio, keeper)
+    shutil.copyfile(audio, duplicate)
+    subprocess.run([str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(audio),
+                    "-c:a", "flac", str(unique)], check=True, timeout=20,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+    app.open_dedup_review(str(dedup_dir))
+    dialog = app.dedup_review_dialog
+    wait_for(window, lambda: not dialog.scanning and not dialog.busy)
+    assert dialog.summary.get() == "扫描 3 个音频文件，发现 1 个可删除的重复文件。"
+    assert len(dialog.groups) == 1 and len(dialog.groups[0]["files"]) == 2
+    marked = [item["path"] for item in dialog.rows.values() if item["deleting"] and not item["keeper"]]
+    kept = [item["path"] for item in dialog.rows.values() if item["keeper"]]
+    assert marked == [str(duplicate)] and kept == [str(keeper)]
+    dialog.remove_marked()
+    wait_for(window, lambda: not dialog.busy and not dialog.scanning)
+    assert not duplicate.exists() and keeper.exists() and unique.exists()
+    assert dialog.summary.get() == "扫描 2 个音频文件，发现 0 个可删除的重复文件。"
+    dialog.close()
+finally:
+    app.close()
+print("Dedup review deleted the marked duplicate and kept the unique files.")
+
 # Qt 界面骨架：离屏构建主窗口、导航、队列页与主题切换。
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import StudioQt

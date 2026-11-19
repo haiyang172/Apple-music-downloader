@@ -59,6 +59,7 @@ from shared_music_ui import SharedMusicBrowser, public_music_source, resolve_pub
 from storage import clean_name, destination_for
 from tag_edit import TagEditStore
 from tag_edit_ui import TagEditor
+from dedup_review_ui import DedupReview
 from video_links_ui import VideoLinkPage, video_link_source
 from windows_drop import install_drop_target
 from youtube_download import resolve_youtube
@@ -184,6 +185,7 @@ class Studio:
         self.music_preflight_dialog = None
         self.bili_preflight_dialog = None
         self.tag_editor_dialog = None
+        self.dedup_review_dialog = None
         self.web_profile_clearing = False
         self.web_profile_stop = threading.Event()
         self.connect_after_web_clear = False
@@ -1110,6 +1112,19 @@ class Studio:
             self.tag_editor_dialog = TagEditor(self, store, paths)
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
             self.error("无法打开音频标签", error)
+
+    def open_dedup_review(self, folder=""):
+        if self.closing:
+            return
+        if self.dedup_review_dialog is not None:
+            if self.dedup_review_dialog.busy:
+                self.dedup_review_dialog.window.lift()
+                return
+            self.dedup_review_dialog.close()
+        try:
+            self.dedup_review_dialog = DedupReview(self, folder)
+        except (OSError, RuntimeError, ValueError, tk.TclError) as error:
+            self.error("无法打开曲库去重", error)
 
     def export_queue_playlist(self):
         selected = set(self.queue_tree.selection())
@@ -2093,6 +2108,8 @@ class Studio:
             self.bili_preflight_dialog.close()
         if self.tag_editor_dialog is not None:
             self.tag_editor_dialog.close()
+        if self.dedup_review_dialog is not None:
+            self.dedup_review_dialog.close()
         self.queue_add_stop.set()
         if self.queue_add_render_timer is not None:
             self.window.after_cancel(self.queue_add_render_timer)
@@ -2126,7 +2143,8 @@ class Studio:
             return True
         if (not self.closing or self.busy or self.queue_adding or self.service_busy or self.auth_busy
                 or self.web_login_busy or self.web_profile_clearing
-                or (self.tag_editor_dialog is not None and self.tag_editor_dialog.busy)):
+                or (self.tag_editor_dialog is not None and self.tag_editor_dialog.busy)
+                or (self.dedup_review_dialog is not None and self.dedup_review_dialog.busy)):
             return False
         try:
             if self.engine is not None:
