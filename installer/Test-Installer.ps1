@@ -2339,6 +2339,77 @@ try:
 finally:
     app.close()
 print("Local conversion, measured source/output formats, persistent details, and older task inspection passed.")
+
+import tag_edit
+from music_tagging import write_music_tags
+
+tag_folder = profile / "音频标签测试"
+tag_folder.mkdir()
+original_tags, decoded_audio, tag_paths = {}, {}, []
+tag_store = tag_edit.TagEditStore(profile / "tag-engine-history")
+for suffix, codec in (("mp3", "libmp3lame"), ("m4a", "aac"), ("flac", "flac"),
+                      ("wav", "pcm_s24le"), ("opus", "libopus")):
+    path = tag_folder / ("原文件名." + suffix)
+    subprocess.run([str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(audio),
+                    "-c:a", codec, str(path)], check=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+    write_music_tags(path, "保留的歌名", "原歌手", lyrics="[00:00.00]保留的歌词")
+    original_tags[str(path)] = path.read_bytes()
+    command = [str(backend / "tools/ffmpeg.exe"), "-v", "error", "-i", str(path),
+               "-map", "0:a:0", "-f", "s24le", "-acodec", "pcm_s24le", "-"]
+    decoded_audio[str(path)] = subprocess.run(command, capture_output=True, check=True, timeout=20,
+                                             creationflags=subprocess.CREATE_NO_WINDOW).stdout
+    tag_paths.append((path, command))
+tag_record = tag_store.apply([{"path": str(path), "expected": tag_store.read_audio(path)["fingerprint"],
+                              "changes": {"artist": "新歌手", "album": "共同专辑", "genre": "游戏原声",
+                                          "date": "2026", "tracknumber": "2/12"}}
+                             for path, _ in tag_paths])
+assert tag_record["state"] == "applied" and len(tag_record["items"]) == 5
+for path, command in tag_paths:
+    info = tag_store.read_audio(path)
+    assert info["title"] == "保留的歌名" and info["artist"] == "新歌手" and info["album"] == "共同专辑"
+    assert info["genre"] == "游戏原声" and info["date"] == "2026" and info["tracknumber"] == "2/12"
+    assert subprocess.run(command, capture_output=True, check=True, timeout=20,
+                          creationflags=subprocess.CREATE_NO_WINDOW).stdout == decoded_audio[str(path)]
+tag_store = tag_edit.TagEditStore(profile / "tag-engine-history")
+assert any(item["id"] == tag_record["id"] for item in tag_store.list_history())
+assert tag_store.undo(tag_record["id"])["state"] == "undone"
+assert all(path.read_bytes() == original_tags[str(path)] for path, _ in tag_paths)
+print("Five audio tag formats preserved decoded samples and unchanged fields; durable history restored exact original bytes.")
+
+window, app = new_window()
+try:
+    editable = tag_folder / "界面编辑.m4a"
+    editable.write_bytes(original_tags[str(tag_paths[1][0])])
+    original = editable.read_bytes()
+    app.local_converter.add_files([editable])
+    app.local_converter.edit_tags()
+    editor = app.tag_editor_dialog
+    wait_for(window, lambda: not editor.scanning and not editor.history_loading)
+    assert len(editor.files) == 1 and all(not value.get() for value in editor.enabled.values())
+    assert editor.values["title"].get() == "保留的歌名"
+    for field, value in (("artist", "界面歌手"), ("album", "界面专辑")):
+        editor.values[field].set(value)
+        editor.checks[field].invoke()
+    editor.apply_button.invoke()
+    wait_for(window, lambda: not editor.busy and not editor.scanning and not editor.history_loading)
+    info = editor.store.read_audio(editable)
+    assert info["artist"] == "界面歌手" and info["album"] == "界面专辑" and info["title"] == "保留的歌名"
+    assert editable.name == "界面编辑.m4a" and len(editor.history) == 1
+    batch = next(iter(editor.history))
+    editor.close()
+    app.edit_audio_tags()
+    editor = app.tag_editor_dialog
+    wait_for(window, lambda: not editor.history_loading)
+    assert batch in editor.history
+    editor.notebook.select(editor.history_page)
+    editor.history_tree.selection_set(batch)
+    editor._history_selected()
+    editor.undo_button.invoke()
+    wait_for(window, lambda: not editor.busy and not editor.history_loading)
+    assert editable.read_bytes() == original and editor.history[batch]["state"] == "undone"
+finally:
+    app.close()
+print("Local tag editor applied only checked fields and reopened persistent history to undo without renaming the file.")
 '@
     $smokeScript = Join-Path $testRoot 'smoke.py'
     [IO.File]::WriteAllText($smokeScript, $smokeCode, [Text.UTF8Encoding]::new($false))

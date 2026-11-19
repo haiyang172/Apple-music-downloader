@@ -57,6 +57,8 @@ from shared_music import queue_rows
 from shared_music_cache import SharedMusicCache
 from shared_music_ui import SharedMusicBrowser, public_music_source, resolve_public_music_link
 from storage import clean_name, destination_for
+from tag_edit import TagEditStore
+from tag_edit_ui import TagEditor
 from video_links_ui import VideoLinkPage, video_link_source
 from windows_drop import install_drop_target
 from youtube_download import resolve_youtube
@@ -176,6 +178,7 @@ class Studio:
         self.web_login_busy = False
         self.music_preflight_dialog = None
         self.bili_preflight_dialog = None
+        self.tag_editor_dialog = None
         self.web_profile_clearing = False
         self.web_profile_stop = threading.Event()
         self.connect_after_web_clear = False
@@ -1056,6 +1059,7 @@ class Studio:
         menu.add_command(label="查看任务详情", command=lambda: self.show_task_details(row))
         if any(self.tasks[int(item)].files for item in self.queue_tree.selection()):
             menu.add_command(label="用已保存文件转码", command=self.convert_saved_selection)
+            menu.add_command(label="编辑音频标签", command=self.edit_saved_tags)
             menu.add_command(label="导出播放列表（M3U8）", command=self.export_queue_playlist)
         remote = all(self.tasks[int(item)].source != "local" for item in self.queue_tree.selection())
         menu.add_command(label="按当前设置重新排队", command=self.requeue_selected,
@@ -1071,6 +1075,25 @@ class Studio:
         if paths:
             self.show("local")
             self.local_converter.add_files(paths)
+
+    def edit_saved_tags(self):
+        paths = [path for row in self.queue_tree.selection() for path in self.tasks[int(row)].files
+                 if Path(path).suffix.lower() in {".mp3", ".m4a", ".flac", ".wav", ".opus"}]
+        self.edit_audio_tags(paths)
+
+    def edit_audio_tags(self, paths=()):
+        if self.closing:
+            return
+        if self.tag_editor_dialog is not None:
+            if self.tag_editor_dialog.busy:
+                self.tag_editor_dialog.window.lift()
+                return
+            self.tag_editor_dialog.close()
+        try:
+            store = TagEditStore(settings.DATA / "tag-edits")
+            self.tag_editor_dialog = TagEditor(self, store, paths)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            self.error("无法打开音频标签", error)
 
     def export_queue_playlist(self):
         selected = set(self.queue_tree.selection())
@@ -2052,6 +2075,8 @@ class Studio:
             self.music_preflight_dialog.close()
         if self.bili_preflight_dialog is not None:
             self.bili_preflight_dialog.close()
+        if self.tag_editor_dialog is not None:
+            self.tag_editor_dialog.close()
         self.queue_add_stop.set()
         if self.queue_add_render_timer is not None:
             self.window.after_cancel(self.queue_add_render_timer)
@@ -2084,7 +2109,8 @@ class Studio:
         if self.closed:
             return True
         if (not self.closing or self.busy or self.queue_adding or self.service_busy or self.auth_busy
-                or self.web_login_busy or self.web_profile_clearing):
+                or self.web_login_busy or self.web_profile_clearing
+                or (self.tag_editor_dialog is not None and self.tag_editor_dialog.busy)):
             return False
         try:
             if self.engine is not None:
@@ -2241,6 +2267,8 @@ class Studio:
                         value += f" · 等待原保存磁盘 {waiting}"
                 self.status.set(value)
                 self.log_message(value)
+        if self.closing and self.finish_close():
+            return
         self.pump_timer = self.window.after(80, self.pump)
 
 
