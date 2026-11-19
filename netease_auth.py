@@ -2,6 +2,7 @@
 
 from base64 import b64encode
 from dataclasses import dataclass, field
+from hashlib import md5
 from http.client import HTTPException
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from http.cookies import CookieError, SimpleCookie
@@ -25,11 +26,11 @@ _ACCOUNT = "/api/nuser/account/get"
 _USER_PLAYLISTS = "/api/user/playlist"
 _SONG_SEARCH = "/api/cloudsearch/pc"
 _PLAYER_V1 = "/api/song/enhance/player/url/v1"
+_PLAYER_LEGACY = "/api/song/enhance/player/url"
 _PUBLIC_PLAYLIST_ROUTES = frozenset({"/api/v6/playlist/detail", "/api/v3/song/detail"})
 _AUTH_ROUTES = frozenset({_UNIQUE_KEY, _POLL})
 _API_ROUTES = _PUBLIC_PLAYLIST_ROUTES | {_ACCOUNT, _USER_PLAYLISTS, _SONG_SEARCH, "/api/playlist/detail",
-                                         "/api/song/detail", "/api/song/enhance/player/url",
-                                         _PLAYER_V1}
+                                         "/api/song/detail", _PLAYER_LEGACY, _PLAYER_V1}
 _USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
@@ -40,6 +41,10 @@ _MAX_RESPONSE = 4 * 1024 * 1024
 _MAX_SESSION = 32_768
 _WEAPI_KEY = b"0CoJUm6Qyw8W8jud"
 _WEAPI_IV = b"0102030405060708"
+_EAPI_KEY = b"e82ckenh8dichen8"
+# NetEase risk control rejects logins from overseas nodes; the community workaround
+# is the official realIP parameter with a mainland address (NeteaseCloudMusicApi).
+_REAL_IP = "116.25.146.177"
 _WEAPI_RSA_MODULUS = int(
     "e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e"
     "417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932"
@@ -100,13 +105,15 @@ def _session(uid, values):
     return NeteaseSession(uid, _cookies(values))
 
 
-def _aes_cbc_encrypt(data, key, iv):
+def _aes_encrypt(data, key, *, mode="CBC", iv=None):
     """Encrypt whole AES blocks with Windows CNG; no optional package is needed."""
     import ctypes
     from ctypes import wintypes
 
-    if len(key) != 16 or len(iv) != 16 or not data or len(data) % 16:
+    if len(key) != 16 or not data or len(data) % 16:
         raise ValueError("无效的网易云音乐请求数据。")
+    if mode == "CBC" and (iv is None or len(iv) != 16):
+        raise ValueError("无效的网易云音乐请求向量。")
     try:
         bcrypt = ctypes.WinDLL("bcrypt", use_last_error=True)
     except (AttributeError, OSError):
@@ -134,8 +141,8 @@ def _aes_cbc_encrypt(data, key, iv):
     key_object = None
     try:
         checked(bcrypt.BCryptOpenAlgorithmProvider(ctypes.byref(provider), "AES", None, 0))
-        mode = ctypes.create_unicode_buffer("ChainingModeCBC")
-        checked(bcrypt.BCryptSetProperty(provider, "ChainingMode", mode, ctypes.sizeof(mode), 0))
+        chaining = ctypes.create_unicode_buffer("ChainingModeCBC" if mode == "CBC" else "ChainingModeECB")
+        checked(bcrypt.BCryptSetProperty(provider, "ChainingMode", chaining, ctypes.sizeof(chaining), 0))
         object_length, result_length = ulong(), ulong()
         checked(bcrypt.BCryptGetProperty(provider, "ObjectLength", ctypes.byref(object_length),
                                         ctypes.sizeof(object_length), ctypes.byref(result_length), 0))
@@ -143,9 +150,10 @@ def _aes_cbc_encrypt(data, key, iv):
         checked(bcrypt.BCryptGenerateSymmetricKey(provider, ctypes.byref(key_handle), key_object,
                                                  len(key_object), key_buffer, len(key), 0))
         plaintext = ctypes.create_string_buffer(data, len(data))
-        iv_buffer = ctypes.create_string_buffer(iv, len(iv))
+        iv_buffer = ctypes.create_string_buffer(iv, len(iv)) if mode == "CBC" else None
+        iv_size = len(iv) if mode == "CBC" else 0
         output = ctypes.create_string_buffer(len(data))
-        checked(bcrypt.BCryptEncrypt(key_handle, plaintext, len(data), None, iv_buffer, len(iv), output,
+        checked(bcrypt.BCryptEncrypt(key_handle, plaintext, len(data), None, iv_buffer, iv_size, output,
                                      len(output), ctypes.byref(result_length), 0))
         if result_length.value != len(data):
             raise NeteaseAuthError("Windows 未能准备完整的网易云音乐音质请求。")
@@ -158,6 +166,14 @@ def _aes_cbc_encrypt(data, key, iv):
         ctypes.memset(key_buffer, 0, len(key_buffer))
         if key_object is not None:
             ctypes.memset(key_object, 0, len(key_object))
+
+
+def _aes_cbc_encrypt(data, key, iv):
+    return _aes_encrypt(data, key, mode="CBC", iv=iv)
+
+
+def _aes_ecb_encrypt(data, key):
+    return _aes_encrypt(data, key, mode="ECB")
 
 
 def _weapi_body(params):
@@ -176,13 +192,24 @@ def _weapi_body(params):
     return urlencode({"params": encrypted, "encSecKey": encrypted_key}).encode("ascii")
 
 
+def _eapi_body(path, params):
+    """Match the current web client's AES-ECB eapi envelope for the player route."""
+    text = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
+    message = f"nobody{path}use{text}md5forencrypt"
+    digest = md5(message.encode("utf-8")).hexdigest()
+    data = f"{path}-36cd479b6b5-{text}-36cd479b6b5-{digest}".encode("utf-8")
+    padding = 16 - len(data) % 16
+    return _aes_ecb_encrypt(data + bytes([padding]) * padding, _EAPI_KEY).hex().upper().encode("ascii")
+
+
 def _request(path, params=None, *, chain=None, jar=None, cookies=()):
     if path not in _API_ROUTES and path not in _AUTH_ROUTES:
         raise ValueError("无效的网易云音乐接口。")
     headers = {"User-Agent": _USER_AGENT, "Referer": _SITE + "/", "Origin": _SITE,
                "Accept": "application/json", "Accept-Encoding": "identity"}
     url = _SITE + path
-    query = urlencode(params or {}).encode("ascii")
+    params = {**(params or {}), "realIP": _REAL_IP}
+    query = urlencode(params).encode("ascii")
     data = None
     if path in _AUTH_ROUTES:
         if jar is None or not isinstance(chain, str) or not _CHAIN.fullmatch(chain) or cookies:
@@ -194,16 +221,20 @@ def _request(path, params=None, *, chain=None, jar=None, cookies=()):
         if jar is not None or chain is not None:
             raise ValueError("无效的网易云音乐账号请求。")
         if path == _PLAYER_V1:
-            if (not isinstance(params, dict) or set(params) != {"ids", "level", "encodeType"}
+            if (not isinstance(params, dict) or set(params) != {"ids", "level", "encodeType", "realIP"}
                     or not isinstance(params.get("ids"), str) or not re.fullmatch(r"\[[1-9][0-9]{0,19}\]", params["ids"])
                     or params.get("level") not in ("standard", "higher", "exhigh", "lossless", "hires")
                     or params.get("encodeType") != "flac"):
                 raise ValueError("无效的网易云音乐音质请求。")
-            # The official web client rewrites this route to a WEAPI form POST.
-            # Keep the current session on the same origin; transport never changes entitlement.
-            url = _SITE + "/weapi/song/enhance/player/url/v1"
+            # The current web client wraps this route in an AES-ECB eapi envelope.
+            url = _SITE + "/eapi/song/enhance/player/url/v1"
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-            data = _weapi_body({**params, "csrf_token": dict(cookies).get("__csrf", "")})
+            data = _eapi_body(path, params)
+        elif path == _PLAYER_LEGACY:
+            # The legacy bitrate route now also requires an encrypted form POST.
+            url = _SITE + "/weapi/song/enhance/player/url"
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            data = _weapi_body(params)
         elif query:
             url += "?" + query.decode("ascii")
         if cookies:

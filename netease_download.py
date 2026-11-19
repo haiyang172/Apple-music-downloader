@@ -12,12 +12,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import audio
 from engine import Cancelled
-from shared_music import resolve_music
 
 
 _SONG = re.compile(r"https://music\.163\.com/song\?id=([1-9][0-9]{0,19})")
 _CDN = re.compile(r"m[0-9]{1,6}\.music\.126\.net")
-_MEDIA_ENDPOINT = "https://music.163.com/song/media/outer/url"
 _UNAVAILABLE = "网易云音乐未提供这首歌的公开完整音轨。"
 _ACCOUNT_UNAVAILABLE = "网易云音乐未向当前账号提供这首歌的完整 MP3。"
 _NATIVE_UNAVAILABLE = "网易云音乐未向当前账号提供所选音质的完整音轨。"
@@ -48,24 +46,6 @@ def _check_stop(stop):
 def _open(url, accept):
     request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": accept, "Accept-Encoding": "identity"})
     return build_opener(_NoRedirect()).open(request, timeout=10)
-
-
-def _media_location(identifier):
-    try:
-        with _open(f"{_MEDIA_ENDPOINT}?id={identifier}.mp3", "audio/mpeg"):
-            pass
-    except HTTPError as error:
-        with error:
-            if error.code in (301, 302, 303, 307, 308):
-                values = error.headers.get_all("Location", [])
-                if len(values) == 1:
-                    return _https_cdn(values[0])
-            if error.code in (401, 403, 404, 410, 451):
-                raise RuntimeError(_UNAVAILABLE) from None
-        raise RuntimeError(_NETWORK_ERROR) from None
-    except (URLError, OSError, HTTPException):
-        raise RuntimeError(_NETWORK_ERROR) from None
-    raise RuntimeError(_UNAVAILABLE)
 
 
 def _https_cdn(value, media_type="mp3"):
@@ -277,10 +257,6 @@ def _copy_media(location, stream, stop, on_status, *, expected_size=None, checks
         raise RuntimeError(_NETWORK_ERROR) from None
 
 
-def _duration_value(value):
-    return type(value) in (int, float) and 0 < value <= 86_400
-
-
 def _check_duration(path, ffmpeg, stop, expected, media_type="mp3"):
     demuxer = _FORMATS[media_type][0]
     input_options = ["-enable_drefs", "0", "-use_absolute_path", "0"] if demuxer == "mov" else []
@@ -341,19 +317,10 @@ def _select_source(url, stop, on_status, *, expected_duration, session, source_q
         raise ValueError("请选择支持的网易云音乐源音质。")
     _check_stop(stop)
     if session is None:
-        if source_quality in ("flac", "hires"):
-            raise RuntimeError("网易云音乐公开音轨仅提供 MP3，无法提供所选无损或 Hi-Res 源音质。")
-        if not _duration_value(expected_duration):
-            on_status("正在读取网易云音乐曲目信息…")
-            rows = resolve_music(url)["rows"]
-            expected_duration = rows[0].get("duration") if rows else None
-        if not _duration_value(expected_duration):
-            raise RuntimeError("未获得完整曲目的时长，无法验证公开音轨。")
-        _check_stop(stop)
-        on_status("正在检查网易云音乐公开音轨…")
-        location = _media_location(song[1])
-        result = location, expected_duration, None, None, "mp3", None, None
-    elif source_quality == "legacy":
+        # NetEase retired the anonymous media route in 2026; every tier now
+        # requires an account session, so ask for login before any request.
+        raise RuntimeError("网易云音乐现在需要登录才能获取音轨，请先在网易云音乐页面扫码登录。")
+    if source_quality == "legacy":
         on_status("正在检查网易云音乐账号可用音轨…")
         result = _legacy_account_source(session, song[1], stop)
     else:
@@ -363,74 +330,25 @@ def _select_source(url, stop, on_status, *, expected_duration, session, source_q
     return result
 
 
-def _head_public_size(location, stop):
-    """Read only public CDN headers; an unsupported HEAD never becomes a GET."""
-    _check_stop(stop)
-    location = _https_cdn(location)
-    request = Request(location, method="HEAD", headers={
-        "User-Agent": "Mozilla/5.0", "Accept": "audio/mpeg", "Accept-Encoding": "identity",
-    })
-    try:
-        with build_opener(_NoRedirect()).open(request, timeout=10) as response:
-            _check_stop(stop)
-            if response.status in (405, 501):
-                return None, False
-            headers = response.headers
-            if (response.status != 200 or headers.get_content_type() not in _MP3_MIME
-                    or headers.get("Content-Encoding") not in (None, "identity")
-                    or headers.get("Content-Range") or headers.get("Transfer-Encoding")):
-                raise RuntimeError(_UNAVAILABLE)
-            sizes = headers.get_all("Content-Length", [])
-            if not sizes:
-                size = None
-            elif (len(sizes) != 1 or not re.fullmatch(r"[0-9]{1,10}", sizes[0])
-                    or not 3 <= int(sizes[0]) <= _MAX_BYTES):
-                raise RuntimeError("网易云音乐音轨大小无效或超过下载上限。")
-            else:
-                size = int(sizes[0])
-    except HTTPError as error:
-        with error:
-            _check_stop(stop)
-            if error.code in (405, 501):
-                return None, False
-            message = _UNAVAILABLE if error.code in (401, 403, 404, 410, 451) else _NETWORK_ERROR
-        raise RuntimeError(message) from None
-    except (URLError, OSError, HTTPException):
-        _check_stop(stop)
-        raise RuntimeError(_NETWORK_ERROR) from None
-    _check_stop(stop)
-    return size, True
-
-
 def probe_netease(url, stop, on_status, *, session=None, expected_duration=None, source_quality="auto"):
     """Return only safe, declared source metadata; never download or decode media."""
     location, duration, size, _, media_type, level, bitrate = _select_source(
         url, stop, on_status, expected_duration=expected_duration, session=session, source_quality=source_quality)
     codec = {"mp3": "MP3", "flac": "FLAC", "m4a": "AAC"}[media_type]
-    selected = None
-    if session is None:
-        on_status("正在读取网易云音乐公开音轨文件信息…")
-        size, supported = _head_public_size(location, stop)
-        label = "公开 MP3 · 待下载校验"
-        if not supported:
-            label += "（服务器不支持预检）"
-        bitrate = None
-    else:
-        selected = next((key for key, value in _LEVELS.items() if value == level), None)
-        if selected is None and media_type == "mp3":
-            selected = next((key for key in ("128", "192", "320")
-                             if _matching_bitrate(bitrate, int(key) * 1000)), None)
-        parts = ["平台提供"]
-        if level in _QUALITY_LABELS:
-            parts.append(_QUALITY_LABELS[level])
-        parts.append(codec)
-        if bitrate is not None:
-            parts.append(f"{bitrate / 1000:g} kb/s")
-        parts.append("待下载校验")
-        label = " · ".join(parts)
+    selected = next((key for key, value in _LEVELS.items() if value == level), None)
+    if selected is None and media_type == "mp3":
+        selected = next((key for key in ("128", "192", "320")
+                         if _matching_bitrate(bitrate, int(key) * 1000)), None)
+    parts = ["平台提供"]
+    if level in _QUALITY_LABELS:
+        parts.append(_QUALITY_LABELS[level])
+    parts.append(codec)
+    if bitrate is not None:
+        parts.append(f"{bitrate / 1000:g} kb/s")
+    parts.append("待下载校验")
     _check_stop(stop)
-    return {"source": "netease", "requested": source_quality, "selected": selected, "label": label,
-            "codec": codec, "bitrate": bitrate, "size": size, "duration": duration}
+    return {"source": "netease", "requested": source_quality, "selected": selected,
+            "label": " · ".join(parts), "codec": codec, "bitrate": bitrate, "size": size, "duration": duration}
 
 
 def download_netease(url, stage, ffmpeg, stop, on_status, *, expected_duration=None, session=None,

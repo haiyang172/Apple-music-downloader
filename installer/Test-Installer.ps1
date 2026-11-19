@@ -1546,17 +1546,12 @@ try:
     song, = [task for task in app.tasks.values() if task.source == "netease"]
     assert (song.url, song.position, song.total, song.duration) == (netease_song, 1, 5, 90)
 
-    def netease_fixture(url, stage, ffmpeg, stop, on_status, *, session=None, expected_duration=None, source_quality=None):
-        assert url == netease_song and expected_duration == 90 and session is None
-        assert source_quality == "auto"
-        return Path(shutil.copyfile(profile / "local-test.mp3", stage / "fixture.mp3"))
-
-    with patch.object(apple_download, "download_netease", side_effect=netease_fixture):
-        netease._enqueue(True)
-        wait_for(window, lambda: not app.busy)
+    # NetEase retired the anonymous media route in 2026: without a login the
+    # queue task must fail with a clear message before any network request.
+    netease._enqueue(True)
+    wait_for(window, lambda: not app.busy)
     song = app.queue_store.get(song.id)
-    assert song.state == "complete" and Path(song.files[0]).name == "Artist - NetEase Fixture.mp3"
-    assert len(song.files) == 1 and Path(song.files[0]).read_bytes() == (profile / "local-test.mp3").read_bytes()
+    assert song.state == "failed" and "登录" in song.error and song.files == []
 
     netease_account = netease.account
     netease_session = NeteaseSession(12345, (("MUSIC_U", "isolated-fixture-netease-cookie"),))
