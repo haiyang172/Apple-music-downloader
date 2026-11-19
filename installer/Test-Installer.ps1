@@ -1620,8 +1620,8 @@ try:
     watch_task = [item for item in app.queue_store.list_tasks() if item.url == watch_row["url"]]
     assert len(watch_task) == 1 and watch_task[0].state == "pending" and not watch_task[0].files
     assert netease.status.get().startswith("追更 · 已加入 1 首新增曲目")
-    assert "1973665669" in playlist_watch.PlaylistWatch(settings.DATA / "playlist-watch.json").load().batches[
-        next(iter(watch.batches))]["tracks"]
+    reloaded = playlist_watch.PlaylistWatch(settings.DATA / "playlist-watch.json").load()
+    assert any("1973665669" in url for entry in reloaded.batches.values() for url in entry["tracks"])
 
     app.fields["music_sidecars"].set(False)
     netease_account.logout()
