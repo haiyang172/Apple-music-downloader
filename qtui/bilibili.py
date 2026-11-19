@@ -25,6 +25,9 @@ class BilibiliPage(QWidget):
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
         header.addWidget(title)
         header.addStretch(1)
+        self.account_button = QPushButton("账户")
+        self.account_button.clicked.connect(self.open_account)
+        header.addWidget(self.account_button)
         layout.addLayout(header)
 
         bar = QHBoxLayout()
@@ -69,6 +72,19 @@ class BilibiliPage(QWidget):
         self.timer.start()
         self._refresh()
 
+    def open_account(self):
+        from qtui.account import MusicAccountDialog
+        dialog = MusicAccountDialog(self, "bilibili")
+        dialog.exec()
+
+    def _load_session(self):
+        import settings
+        from bili_auth import BiliAuth
+        try:
+            return BiliAuth(settings.DATA / "bilibili-session.dat").load()
+        except Exception:
+            return None
+
     def resolve(self):
         value = self.entry.text().strip()
         if not value or self.busy:
@@ -80,10 +96,11 @@ class BilibiliPage(QWidget):
 
         def run():
             try:
+                session = self._load_session()
                 if bili_collections.is_collection_link(value):
-                    result = bili_collections.resolve_collection(value, stop=self.stop)
+                    result = bili_collections.resolve_collection(value, stop=self.stop, session=session)
                 elif bili_catalog.is_video_link(value):
-                    result = bili_catalog.resolve_video(value, session=None)
+                    result = bili_catalog.resolve_video(value, session=session)
                 else:
                     self.messages.append(("error", "请输入 B 站视频链接、短链、BV 或 av 号。"))
                     return

@@ -2929,6 +2929,22 @@ with patch.object(NeteaseAuth, "load", return_value=None), \
     assert acct_dialog.session == acct_session and acct_saved.get("session") == acct_session
     acct_dialog.close()
 
+# Qt B 站账户页：扫码登录成功后保存会话。
+from bili_auth import BiliAuth, BiliSession, BiliAccount, LoginPoll
+bili_saved = {}
+bili_qr = SimpleNamespace(url="https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1")
+bili_session = BiliSession((("SESSDATA", "fixture"),))
+with patch.object(BiliAuth, "load", return_value=None), \
+     patch.object(BiliAuth, "begin", return_value=bili_qr), \
+     patch.object(BiliAuth, "poll", return_value=LoginPoll("success", bili_session)), \
+     patch.object(BiliAuth, "save", side_effect=lambda s: bili_saved.update(session=s)), \
+     patch.object(BiliAuth, "check", return_value=BiliAccount(12345, "测试UP")):
+    bili_dialog = MusicAccountDialog(qt_window, "bilibili")
+    assert bili_dialog.polling
+    bili_dialog.poll()
+    assert bili_dialog.session == bili_session and bili_saved.get("session") == bili_session
+    bili_dialog.close()
+
 # Qt 预览页：读取音轨规格并加入队列。
 from qtui.preview import MusicPreviewDialog
 import qq_download

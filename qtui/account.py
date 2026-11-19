@@ -13,14 +13,16 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLa
 from qrcodegen import QrCode
 
 import settings
+from bili_auth import BiliAuth
 from netease_auth import NeteaseAuth
 from qq_auth import QqAuth
 
 AUTH = {
     "qq": lambda: QqAuth(settings.DATA / "qq-music-session.dat"),
     "netease": lambda: NeteaseAuth(settings.DATA / "netease-music-session.dat"),
+    "bilibili": lambda: BiliAuth(settings.DATA / "bilibili-session.dat"),
 }
-NAMES = {"qq": "QQ 音乐", "netease": "网易云音乐"}
+NAMES = {"qq": "QQ 音乐", "netease": "网易云音乐", "bilibili": "B 站"}
 
 
 def qr_pixmap(url, scale=3):
