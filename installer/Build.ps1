@@ -230,7 +230,8 @@ $sources = @('Studio.py', 'app_update.py', 'apple_download.py', 'apple_web_login
     'local_convert.py', 'local_convert_ui.py', 'windows_drop.py', 'video_links_ui.py',
     'youtube_download.py', 'youtube_browse.py', 'youtube_browse_worker.py',
     'netease_auth.py', 'netease_catalog.py', 'netease_download.py', 'netease_sidecars.py',
-    'music_tagging.py', 'web_audio.py', 'playlist_export.py', 'tag_edit.py', 'tag_edit_ui.py')
+    'music_tagging.py', 'web_audio.py', 'playlist_export.py', 'tag_edit.py', 'tag_edit_ui.py',
+    'StudioQt.py')
 foreach ($file in $sources) { Get-Item -LiteralPath (Join-Path $studio $file) | Out-Null }
 foreach ($path in @($distribution, $buildTools)) {
     [void][IO.Directory]::CreateDirectory($path)
@@ -243,6 +244,11 @@ $stage = Join-Path $PSScriptRoot ('.stage-' + [Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($stage)
 try {
     foreach ($file in $sources) { Copy-Item -LiteralPath (Join-Path $studio $file) -Destination $stage }
+    $qtui = Join-Path $stage 'qtui'
+    [void][IO.Directory]::CreateDirectory($qtui)
+    foreach ($file in @('__init__.py', 'main_window.py', 'pages.py', 'theme.py')) {
+        Copy-Item -LiteralPath (Join-Path $studio ('qtui\' + $file)) -Destination $qtui
+    }
     Set-Content -LiteralPath (Join-Path $stage 'app-version.txt') -Value $Version -Encoding ASCII
     foreach ($file in @('README.md', 'THIRD_PARTY.md', 'LICENSE', 'LICENSE.txt')) {
         $source = Join-Path $studio $file
@@ -283,7 +289,7 @@ try {
     $lib = Join-Path $stage 'lib'
     [void][IO.Directory]::CreateDirectory($lib)
     foreach ($item in Get-ChildItem -LiteralPath $PythonLib -Directory) {
-        if ($item.Name -match '^(?:yaml|_yaml|mutagen|mutagen-[^\\/]+\.dist-info|pyyaml-[^\\/]+\.dist-info)$') {
+        if ($item.Name -match '^(?:yaml|_yaml|mutagen|mutagen-[^\\/]+\.dist-info|pyyaml-[^\\/]+\.dist-info|PySide6|shiboken6|PySide6_Essentials-[^\\/]+\.dist-info|shiboken6-[^\\/]+\.dist-info)$') {
             Copy-SafeTree $item.FullName (Join-Path $lib $item.Name)
         }
     }
@@ -333,6 +339,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The Media Download Desk launcher could not be compiled.' }
     Remove-Item -LiteralPath $versionSource
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Portable.cmd') -Destination (Join-Path $stage 'Run.cmd')
+    if (Test-Path -LiteralPath (Join-Path $studio 'RunQt.cmd') -PathType Leaf) {
+        Copy-Item -LiteralPath (Join-Path $studio 'RunQt.cmd') -Destination (Join-Path $stage 'RunQt.cmd')
+    }
 
     & $InnoCompiler /Qp "/O$distribution" "/DAppVersion=$Version" "/DPayloadDir=$stage" (Join-Path $PSScriptRoot 'Setup.iss')
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {

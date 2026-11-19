@@ -29,7 +29,7 @@ foreach ($file in $files) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing build input: $file" }
 }
 if ($CheckOnly) {
-    & (Join-Path $build.PythonHome 'python.exe') -I -B -c 'import pathlib,sys; root=pathlib.Path(sys.argv[1]);sys.path.insert(0,str(root));import Studio,tag_edit,tag_edit_ui,mutagen,yaml,tkinter;assert Studio.ROOT==root and Studio.find_backend()==root.joinpath(sys.argv[2]) and pathlib.Path(mutagen.__file__).is_relative_to(root.joinpath(sys.argv[3]));print(sys.argv[1], Studio.APP_VERSION)' $root 'backend' 'lib'
+    & (Join-Path $build.PythonHome 'python.exe') -I -B -c 'import pathlib,sys; root=pathlib.Path(sys.argv[1]);sys.path.insert(0,str(root));import Studio,tag_edit,tag_edit_ui,mutagen,yaml,tkinter,PySide6.QtWidgets,StudioQt;assert Studio.ROOT==root and Studio.find_backend()==root.joinpath(sys.argv[2]) and pathlib.Path(mutagen.__file__).is_relative_to(root.joinpath(sys.argv[3]));print(sys.argv[1], Studio.APP_VERSION)' $root 'backend' 'lib'
     if ($LASTEXITCODE -ne 0) { throw 'The local runtime could not import the working copy.' }
     return
 }

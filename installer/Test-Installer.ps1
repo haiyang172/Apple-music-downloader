@@ -2705,6 +2705,27 @@ try:
 finally:
     app.close()
 print("The download queue entry opened the same editor and undid the applied tags byte-for-byte.")
+
+# Qt 界面骨架：离屏构建主窗口、导航、队列页与主题切换。
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+import StudioQt
+qt_window = StudioQt.build_window(dark=False)
+assert qt_window.windowTitle() == "影音下载台"
+assert list(qt_window.buttons) == ["music", "bilibili", "qq", "netease", "youtube", "douyin",
+                                   "queue", "local", "settings"]
+qt_window.show_page("queue")
+assert qt_window.pages["queue"].table.rowCount() == len(app.queue_store.list_tasks())
+qt_window.show_page("settings")
+qt_window.pages["settings"].toggle_theme()
+assert qt_window.pages["settings"].dark is True
+qt_window.pages["settings"].toggle_theme()
+assert qt_window.pages["settings"].dark is False
+for key in ("music", "bilibili", "qq", "netease", "youtube", "douyin", "local"):
+    qt_window.show_page(key)
+    assert qt_window.stack.currentWidget() is qt_window.pages[key]
+qt_window.close()
+qt_window.deleteLater()
+print("The Qt shell booted offscreen with the real queue, navigation and both themes.")
 '@
     $smokeScript = Join-Path $testRoot 'smoke.py'
     [IO.File]::WriteAllText($smokeScript, $smokeCode, [Text.UTF8Encoding]::new($false))
