@@ -40,6 +40,7 @@ DEFAULTS = {
     "notify_done": True,
     "dark_mode": False,
     "ui_mode": "qt",
+    "proxy": "",
 }
 
 

@@ -142,6 +142,8 @@ def _quality_source(session, identifier, stop, source_quality):
     item = items[0]
     if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] != song_id:
         raise RuntimeError(_NATIVE_UNAVAILABLE)
+    if type(item.get("code")) is int and item["code"] in (403, 404, 410, 451):
+        raise RuntimeError("该曲目当前不可用，可能受版权、会员或地区限制。")
     if item.get("freeTrialInfo") is not None:
         raise RuntimeError("网易云音乐仅向当前账号提供试听片段。")
     media_type, actual_level = item.get("type"), item.get("level")

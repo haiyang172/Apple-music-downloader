@@ -373,6 +373,10 @@ class SettingsPage(QWidget):
         self.ui_mode.setCurrentText(UI_MODES.get(self.preferences.get("ui_mode", "qt"), UI_MODES["qt"]))
         form.addLayout(self._row("启动界面", self.ui_mode))
 
+        self.proxy = QLineEdit(str(self.preferences.get("proxy", "")))
+        self.proxy.setPlaceholderText("例如 http://127.0.0.1:7890（留空则直连）")
+        form.addLayout(self._row("网络代理", self.proxy))
+
         save_row = QHBoxLayout()
         save_row.addStretch(1)
         self.save_button = QPushButton("保存设置")
@@ -422,7 +426,10 @@ class SettingsPage(QWidget):
                                        if label == self.youtube_format.currentText()), "video")
         values["ui_mode"] = next((key for key, label in UI_MODES.items()
                                   if label == self.ui_mode.currentText()), "qt")
+        values["proxy"] = self.proxy.text().strip()
         settings.save(values)
+        import net_proxy
+        net_proxy.apply(values)
         self.status_message = "设置已保存"
 
     def _theme_text(self):

@@ -3090,10 +3090,19 @@ qt_settings.folder.setText(str(profile))
 qt_settings.category.setText("测试分类")
 qt_settings.output.setCurrentText(audio.OUTPUTS["mp3"])
 qt_settings.mp3_bitrate.setCurrentText("192")
+qt_settings.proxy.setText("http://127.0.0.1:7890")
 qt_settings.save()
 qt_saved = settings.load()
 assert (qt_saved["folder"], qt_saved["category"], qt_saved["output"], qt_saved["mp3_bitrate"]) == (
     str(profile), "测试分类", "mp3", 192)
+assert qt_saved["proxy"] == "http://127.0.0.1:7890"
+import net_proxy
+assert net_proxy.apply({"proxy": "http://127.0.0.1:7890"}) == "http://127.0.0.1:7890"
+assert net_proxy.apply({"proxy": "socks5://127.0.0.1:7890"}) == ""
+qt_settings.proxy.setText("")
+qt_settings.save()
+assert net_proxy.apply(settings.load()) == ""
+assert "HTTPS_PROXY" not in os.environ
 
 # 启动分发默认 Qt，可切回 Tkinter。
 assert Studio._launch_ui() == "qt"

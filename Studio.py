@@ -1414,6 +1414,15 @@ class Studio:
         self.label(launcher, "下次启动生效；Qt 新界面缺少部分队列细节时可切回 Tkinter。", muted=True).grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        network = self.card(page, 5)
+        network.columnconfigure(1, weight=1)
+        self.label(network, "网络").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.label(network, "代理").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        proxy_entry = ttk.Entry(network, textvariable=self.fields["proxy"], width=34)
+        proxy_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
+        self.label(network, "HTTP 代理，如 http://127.0.0.1:7890；留空则直连。网易云媒体在海外需要国内代理才能下载。",
+                   muted=True, wrap=385).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         updates = self.card(page, 4)
         updates.columnconfigure(0, weight=1)
         self.update_status = tk.StringVar(page, f"版本 {APP_VERSION}" if APP_VERSION else "版本未知")
@@ -1802,6 +1811,8 @@ class Studio:
             if values["folder"]:
                 destination_for(values["folder"], values["category"])
             self.store(values)
+            import net_proxy
+            net_proxy.apply(values)
             self.status.set("设置已保存")
         except (OSError, RuntimeError, ValueError) as error:
             self.error("无法保存设置", error)
@@ -2403,6 +2414,8 @@ def _launch_ui():
 
 def main():
     configure_windows()
+    import net_proxy
+    net_proxy.apply()
     if _launch_ui() == "qt":
         try:
             import StudioQt

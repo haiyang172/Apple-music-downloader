@@ -28,6 +28,9 @@ def build_window(dark=None):
     """Create the shell window (used by tests as well as main())."""
     from PySide6.QtWidgets import QApplication
 
+    import net_proxy
+
+    net_proxy.apply()
     qt_app = QApplication.instance() or QApplication(sys.argv[:1])
     dark = bool(settings.load().get("dark_mode", False)) if dark is None else bool(dark)
     apply_theme(qt_app, dark)
