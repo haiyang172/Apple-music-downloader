@@ -1422,6 +1422,10 @@ class Studio:
         proxy_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
         self.label(network, "HTTP 代理，如 http://127.0.0.1:7890；留空则直连。网易云媒体在海外需要国内代理才能下载。",
                    muted=True, wrap=385).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.network_status = tk.StringVar(page, "显示当前出口 IP，用于确认代理或加速器是否生效。")
+        self.action(network, "测试网络", self.test_network).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.label(network, variable=self.network_status, muted=True, wrap=385).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         updates = self.card(page, 4)
         updates.columnconfigure(0, weight=1)
@@ -1804,6 +1808,29 @@ class Studio:
 
     def error(self, title, problem):
         messagebox.showerror(title, str(problem), parent=self.window)
+
+    def test_network(self):
+        """Report the current egress IP so a proxy or accelerator can be verified."""
+        import json
+        import net_proxy
+        from urllib.request import Request, build_opener
+
+        proxy = net_proxy.apply(self.snapshot())
+        self.network_status.set("正在检测出口…" + (f"（代理 {proxy}）" if proxy else "（直连）"))
+
+        def run():
+            try:
+                request = Request("http://ip-api.com/json/?fields=query,country,city,isp",
+                                  headers={"User-Agent": "Mozilla/5.0"})
+                with build_opener().open(request, timeout=12) as response:
+                    data = json.loads(response.read().decode("utf-8", "replace"))
+                text = (f"出口 {data.get('query')} · {data.get('country', '')} {data.get('city', '')} · "
+                        f"{data.get('isp', '')}")
+            except (OSError, ValueError, RuntimeError) as error:
+                text = f"网络检测失败：{error}"
+            self.post("network_diag", text)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def save_preferences(self):
         try:
@@ -2303,6 +2330,8 @@ class Studio:
                     self._display_task_details(task, task.audio_details or records)
             elif kind == "links_resolved":
                 self.finish_links(*value)
+            elif kind == "network_diag":
+                self.network_status.set(str(value))
             elif kind == "update_result":
                 self.receive_update(*value)
             elif kind == "web_login_done":

@@ -292,6 +292,19 @@ class LocalPage(QWidget):
             self.core.start(ids)
 
 
+def egress_text():
+    """Return a one-line description of the current egress IP."""
+    import json
+    from urllib.request import Request, build_opener
+
+    request = Request("http://ip-api.com/json/?fields=query,country,city,isp",
+                      headers={"User-Agent": "Mozilla/5.0"})
+    with build_opener().open(request, timeout=12) as response:
+        data = json.loads(response.read().decode("utf-8", "replace"))
+    return (f"出口 {data.get('query')} · {data.get('country', '')} {data.get('city', '')} · "
+            f"{data.get('isp', '')}")
+
+
 class SettingsPage(QWidget):
     def __init__(self, app, dark):
         super().__init__()
@@ -377,6 +390,21 @@ class SettingsPage(QWidget):
         self.proxy.setPlaceholderText("例如 http://127.0.0.1:7890（留空则直连）")
         form.addLayout(self._row("网络代理", self.proxy))
 
+        diag_row = QHBoxLayout()
+        self.diag_button = QPushButton("测试网络")
+        self.diag_button.clicked.connect(self.test_network)
+        diag_row.addWidget(self.diag_button)
+        self.diag = QLabel("显示当前出口 IP，用于确认代理或加速器是否生效。")
+        self.diag.setWordWrap(True)
+        self.diag.setProperty("muted", True)
+        diag_row.addWidget(self.diag, 1)
+        form.addLayout(diag_row)
+        self.messages = []
+        self.timer = QTimer(self)
+        self.timer.setInterval(150)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start()
+
         save_row = QHBoxLayout()
         save_row.addStretch(1)
         self.save_button = QPushButton("保存设置")
@@ -431,6 +459,30 @@ class SettingsPage(QWidget):
         import net_proxy
         net_proxy.apply(values)
         self.status_message = "设置已保存"
+
+    def test_network(self):
+        import threading
+
+        import net_proxy
+
+        proxy = net_proxy.apply(settings.load())
+        self.diag.setText("正在检测出口…" + (f"（代理 {proxy}）" if proxy else "（直连）"))
+        self.diag_button.setEnabled(False)
+        messages = self.messages
+
+        def run():
+            try:
+                text = egress_text()
+            except Exception as error:
+                text = f"网络检测失败：{error}"
+            messages.append(text)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def poll(self):
+        while self.messages:
+            self.diag.setText(self.messages.pop(0))
+            self.diag_button.setEnabled(True)
 
     def _theme_text(self):
         self.theme_button.setText("深色模式" if not self.dark else "浅色模式")

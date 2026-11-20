@@ -3104,6 +3104,17 @@ qt_settings.save()
 assert net_proxy.apply(settings.load()) == ""
 assert "HTTPS_PROXY" not in os.environ
 
+# 设置页网络诊断显示出口地址。
+import qtui.pages as qt_pages
+with patch.object(qt_pages, "egress_text", return_value="出口 1.2.3.4 · 中国 深圳 · 电信"):
+    qt_settings.test_network()
+    deadline = time.monotonic() + 15
+    while not qt_settings.messages and time.monotonic() < deadline:
+        qt_settings.poll()
+        time.sleep(0.02)
+    qt_settings.poll()
+    assert "1.2.3.4" in qt_settings.diag.text()
+
 # 启动分发默认 Qt，可切回 Tkinter。
 assert Studio._launch_ui() == "qt"
 settings.save({**settings.load(), "ui_mode": "tkinter"})

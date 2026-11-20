@@ -325,6 +325,17 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
     assert net_proxy.apply(settings.load()) == ""
     assert "HTTPS_PROXY" not in os.environ
 
+    # 设置页的网络诊断显示出口信息。
+    import qtui.pages as qt_pages
+    with patch.object(qt_pages, "egress_text", return_value="出口 1.2.3.4 · 中国 深圳 · 电信"):
+        settings_page.test_network()
+        deadline = time.monotonic() + 15
+        while not settings_page.messages and time.monotonic() < deadline:
+            settings_page.poll()
+            time.sleep(0.02)
+        settings_page.poll()
+        assert "1.2.3.4" in settings_page.diag.text()
+
     # Launch dispatch defaults to Qt and can switch to Tkinter.
     import Studio
     assert Studio._launch_ui() == "qt"
