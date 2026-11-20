@@ -145,9 +145,11 @@ def _quality_source(session, identifier, stop, source_quality):
     if item.get("freeTrialInfo") is not None:
         raise RuntimeError("网易云音乐仅向当前账号提供试听片段。")
     media_type, actual_level = item.get("type"), item.get("level")
+    # The legacy auto route reports encodeType "mp3" even for FLAC, so only the
+    # explicit v1 route carries a meaningful encodeType to verify.
     if (type(item.get("code")) is not int or item["code"] != 200
             or not isinstance(media_type, str) or media_type not in _FORMATS
-            or item.get("encodeType") not in _FORMATS[media_type][2]):
+            or (source_quality != "auto" and item.get("encodeType") not in _FORMATS[media_type][2])):
         raise RuntimeError(_NATIVE_UNAVAILABLE)
     if source_quality == "auto":
         if not isinstance(actual_level, str) or actual_level not in _QUALITY_LABELS:
@@ -251,7 +253,15 @@ def _copy_media(location, stream, stop, on_status, *, expected_size=None, checks
                 raise RuntimeError("网易云音乐音轨校验失败，请重试。")
     except HTTPError as error:
         error.close()
-        message = failure if error.code in (401, 403, 404, 410, 451) else _NETWORK_ERROR
+        if error.code == 401:
+            message = "网易云音乐登录已失效，请重新登录。"
+        elif error.code == 403:
+            message = ("网易云音乐媒体服务器拒绝了当前网络，常见于海外 IP；"
+                       "请使用国内网络或代理后重试。")
+        elif error.code in (404, 410, 451):
+            message = failure
+        else:
+            message = _NETWORK_ERROR
         raise RuntimeError(message) from None
     except (URLError, TimeoutError, HTTPException):
         raise RuntimeError(_NETWORK_ERROR) from None
