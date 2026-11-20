@@ -7,7 +7,7 @@
 | 项目 | 交接时的值 |
 | --- | --- |
 | 已发布供日常使用 | [v0.3.38](https://github.com/haiyang172/Media-Download-Desk/releases/tag/v0.3.38)，本地 `installer/dist/0.3.38/MediaDownloadDesk-Setup.exe` |
-| 0.3.40 候选包 | `installer/dist/0.3.40/MediaDownloadDesk-Setup.exe`（2026-11-20 构建，SHA-256 `fd51e124b97847112bf35b79332a0d91b734928843fa8aee0f5b879f6fe8e66b`），完整安装检查通过 |
+| 0.3.40 候选包 | `installer/dist/0.3.40/MediaDownloadDesk-Setup.exe`（2026-11-20 构建，SHA-256 `817388ff5f43880902a9129dcd519aff199ebab488e0ddf71b45093a9fd43965`），完整安装检查通过 |
 | 已发布源码基线 | `0321f6a5a950aabea3930609d2ec70f5531fedb1`， GitHub 分支 `media-download-desk`（已推进到本轮 0.3.40 提交） |
 | D 盘工作分支 | `handoff/v0.3.39` |
 | 2026-11-19/20 开发轮 | 标签修复、NetEase 修复、Qt 完整迁移（默认界面）、深色模式、窗口记忆、完成通知、歌单追更、曲库去重、个人歌单/收藏夹/资料库 |
@@ -88,7 +88,7 @@ v0.3.38 安装包 SHA-256 为 `af4468ea5198022e99bfc92825802ef64760886f185892841
 
 ## 2026-11-20 开发轮（v0.3.40 进行中）
 
-- **网易云修复。** 2026 年网易云下线了匿名取流（`outer/url` 全量 404、匿名 weapi 无地址），现在未登录下载直接提示「需要登录」。登录请求带官方 `realIP` 参数（国内地址）绕过海外节点风控；播放地址 v1 路由改为现行网页端的 AES-ECB eapi 信封（CNG ECB 已用 FIPS-197 验证），旧 bitrate 路由改为 weapi POST。登录链路 begin/poll 已实测可用，eapi 取流需用户扫码后实测。**海外网络下扫码常返回 8821（需要安全验证）：手机确认与实名都无法解除（触发点是异地 IP）；已在 Tkinter 与 Qt 账户页加入「使用浏览器 Cookie」入口 —— 浏览器登录 music.163.com 后复制 `MUSIC_U` 粘贴即可建立会话（`NeteaseAuth.login_with_cookies`，含单元与安装冒烟测试）。**
+- **网易云修复。** 2026 年网易云下线了匿名取流（`outer/url` 全量 404、匿名 weapi 无地址），现在未登录下载直接提示「需要登录」。登录请求带官方 `realIP` 参数（国内地址）绕过海外节点风控；播放地址 v1 路由改为现行网页端的 AES-ECB eapi 信封（CNG ECB 已用 FIPS-197 验证），旧 bitrate 路由改为 weapi POST。登录链路 begin/poll 已实测可用，eapi 取流需用户扫码后实测。**海外网络下扫码常返回 8821（需要安全验证）：手机确认与实名都无法解除（触发点是异地 IP）；已在 Tkinter 与 Qt 账户页加入「使用浏览器 Cookie」入口 —— 浏览器登录 music.163.com 后复制 `MUSIC_U` 粘贴即可建立会话（`NeteaseAuth.login_with_cookies`，含单元与安装冒烟测试）。** 另外实测确认：网易云媒体 CDN（`m*.music.126.net`，Tengine）对海外 IP 的取流一律返回 403（换 UA/Referer/Cookie/Range、带或不带 `realIP`、各音质与 player/download 两条路由均相同）；登录与曲目解析正常，仅下载被拒，需国内网络或代理。旧 player 路由即使返回 FLAC 也把 `encodeType` 报成 `mp3`，因此 `encodeType` 校验只对 v1 路由生效。
 - **Qt 迁移。** `StudioQt.py` + `qtui/` 包：左侧导航、浅深主题（持久化到 `dark_mode`）。`qtui/core.py` 复用共享的队列/引擎/登录服务与 `run_tasks` 管线，下载队列页可操作（开始/取消/移除/刷新、实时状态），本地转码、标签编辑（`qtui/tag_editor.py` 复用 `TagEditStore`）、YouTube（`qtui/youtube.py`）、QQ/网易云公开搜索、链接解析与个人歌单（`qtui/music.py`）、B 站分 P、合集与个人收藏夹（`qtui/bilibili.py`）、Apple Music 公开搜索（`qtui/apple.py`）、扫码登录账户页（`qtui/account.py`）、Apple 账户表单（`qtui/apple_account.py`）、Apple 资料库连接与个人歌曲（`qtui/library.py`）、下载预览（`qtui/preview.py`）、完整下载设置页（目录/分类/输出格式/MP3 码率/各平台音质与格式）均已迁移并可入队。**目标清单中的页面已全部迁移完成。** **Qt 现为默认界面**：`settings.ui_mode` 默认 `qt`，`Studio.main()` 分发到 `StudioQt`，Qt 无法加载时回退 Tkinter；两个设置页均可切换「启动界面」。`RunQt.cmd` 可直接启动 Qt，`Run.cmd`（`Studio.py`）按设置分发。安装包已集成 PySide6-Essentials 6.12.0（约 210 MB，THIRD_PARTY.md 已记录许可），安装检查用 `QT_QPA_PLATFORM=offscreen` 验证骨架、本地转码、标签编辑、五平台入队、扫码登录、Apple 登录与资料库、预览、个人歌单、收藏夹、设置保存与启动分发。
 - **Tkinter 增强。** 窗口大小/位置/最大化状态在关闭时保存、启动时恢复；一批任务结束且窗口不在前台时任务栏闪烁加提示音（`notify_done` 设置）；**深色模式**：设置页勾选「深色模式」后下次启动切换深色调色板（与 Qt 壳共享 `dark_mode` 键）。
 - **歌单追更。** [playlist_watch.py](playlist_watch.py) 按批次保存已见曲目日志；QQ/网易云歌单页新增「追更新歌」按钮只入队新增曲目，普通入队自动更新日志。
