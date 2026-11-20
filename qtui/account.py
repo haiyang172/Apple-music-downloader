@@ -73,6 +73,11 @@ class MusicAccountDialog(QDialog):
         self.refresh_button = QPushButton("重新获取二维码")
         self.refresh_button.clicked.connect(self.begin)
         row.addWidget(self.refresh_button)
+        self.cookie_button = None
+        if source == "netease":
+            self.cookie_button = QPushButton("使用浏览器 Cookie")
+            self.cookie_button.clicked.connect(self.login_with_cookies)
+            row.addWidget(self.cookie_button)
         self.logout_button = QPushButton("退出登录")
         self.logout_button.clicked.connect(self.logout)
         row.addWidget(self.logout_button)
@@ -94,6 +99,24 @@ class MusicAccountDialog(QDialog):
             self._signed_in(getattr(self.session, "_name", None) or "已登录")
         else:
             self.begin()
+
+    def login_with_cookies(self, text=None):
+        """Sign in with a browser MUSIC_U cookie when the QR flow is risk-controlled."""
+        if text is None:
+            from PySide6.QtWidgets import QInputDialog
+            text, ok = QInputDialog.getText(
+                self, "使用浏览器 Cookie", "粘贴包含 MUSIC_U 的 Cookie（如 MUSIC_U=xxxx）：")
+            if not ok or not text:
+                return
+        try:
+            session = self.auth.login_with_cookies(text)
+            account = self.auth.check(session)
+        except Exception as error:
+            self.status.setText(str(error))
+            return
+        self.polling = False
+        self.session = session
+        self._signed_in(getattr(account, "name", "") or "已登录")
 
     def begin(self):
         self.polling = False

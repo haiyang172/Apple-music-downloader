@@ -167,6 +167,16 @@ with tempfile.TemporaryDirectory(prefix="amdl-qt-smoke-") as scratch:
         assert bili_dialog.session == bili_session and bili_saved.get("session") == bili_session
         bili_dialog.close()
 
+    # NetEase cookie login fallback when the QR flow is risk-controlled.
+    import netease_auth as na
+    with patch.object(NeteaseAuth, "load", return_value=NeteaseSession(12345, (("MUSIC_U", "x"),))), \
+         patch.object(NeteaseAuth, "save"), \
+         patch.object(na, "_account", return_value=NeteaseAccount(12345, "Cookie用户")):
+        cookie_dialog = MusicAccountDialog(window, "netease")
+        cookie_dialog.login_with_cookies("MUSIC_U=abc123")
+        assert cookie_dialog.session is not None
+        cookie_dialog.close()
+
     # Qt music preview dialog: probe declaration shown and enqueue works.
     import qq_download
     from qtui.preview import MusicPreviewDialog

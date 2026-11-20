@@ -66,6 +66,10 @@ class QrAccountPanel:
         self.retry_button = app.action(card, "重试验证", self.restore)
         self.retry_button.grid(row=3, column=0, pady=(8, 0))
         self.retry_button.grid_remove()
+        self.cookie_button = None
+        if self.source == "netease":
+            self.cookie_button = app.action(card, "使用浏览器 Cookie", self.login_with_cookies)
+            self.cookie_button.grid(row=4, column=0, pady=(8, 0))
         self.restore()
 
     def restore(self):
@@ -99,6 +103,28 @@ class QrAccountPanel:
     def _start_if_needed(self):
         if self.app.active_page == self.page_key and self.session is None and not (self.operation or self.restore_issue):
             self.begin()
+
+    def login_with_cookies(self, text=None):
+        """Sign in with a browser MUSIC_U cookie when the QR flow is risk-controlled."""
+        if self.operation or self.session is not None:
+            return
+        if text is None:
+            from tkinter import simpledialog
+            text = simpledialog.askstring("使用浏览器 Cookie",
+                                          "粘贴包含 MUSIC_U 的 Cookie（如 MUSIC_U=xxxx）：", parent=self.page)
+        if not text:
+            return
+        try:
+            session = self.auth.login_with_cookies(text)
+            account = self.auth.check(session)
+        except (OSError, ValueError, RuntimeError) as error:
+            self.status.set(str(error))
+            return
+        self.session, self.account = session, account
+        self.kept = True
+        self.restore_issue = None
+        self.sync_button()
+        self.show_account()
 
     def begin(self):
         if self.app.closing or self.app.active_page != self.page_key or self.session is not None:

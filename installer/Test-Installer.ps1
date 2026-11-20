@@ -2930,6 +2930,16 @@ with patch.object(NeteaseAuth, "load", return_value=None), \
     assert acct_dialog.session == acct_session and acct_saved.get("session") == acct_session
     acct_dialog.close()
 
+# Qt 网易云 Cookie 登录（扫码被风控时的备用入口）。
+import netease_auth as na
+with patch.object(NeteaseAuth, "load", return_value=NeteaseSession(12345, (("MUSIC_U", "x"),))), \
+     patch.object(NeteaseAuth, "save"), \
+     patch.object(na, "_account", return_value=NeteaseAccount(12345, "Cookie用户")):
+    cookie_dialog = MusicAccountDialog(qt_window, "netease")
+    cookie_dialog.login_with_cookies("MUSIC_U=abc123")
+    assert cookie_dialog.session is not None
+    cookie_dialog.close()
+
 # Qt B 站账户页：扫码登录成功后保存会话。
 from bili_auth import BiliAuth, BiliSession, BiliAccount, LoginPoll
 bili_saved = {}

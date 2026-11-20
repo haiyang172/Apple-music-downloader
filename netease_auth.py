@@ -327,6 +327,28 @@ def _authenticated_cookies(jar):
     return _cookies({name: parsed[name].value for name in _AUTH_COOKIES if name in parsed})
 
 
+def _cookie_values(text):
+    """Parse a browser cookie string or a bare MUSIC_U value into session cookies."""
+    if not isinstance(text, str) or not 0 < len(text) <= 16384:
+        raise ValueError("Cookie 内容无效。")
+    stripped = text.strip()
+    if "=" not in stripped:
+        values = {"MUSIC_U": stripped}
+    else:
+        parsed = SimpleCookie()
+        try:
+            parsed.load(stripped)
+        except CookieError:
+            raise NeteaseAuthError("Cookie 格式无效，请粘贴 MUSIC_U=... 形式的完整 Cookie。") from None
+        values = {name: morsel.value for name, morsel in parsed.items() if name in _AUTH_COOKIES}
+    if not values.get("MUSIC_U"):
+        raise NeteaseAuthError("Cookie 中缺少 MUSIC_U，请从已登录的浏览器复制。")
+    for value in values.values():
+        if not _COOKIE_VALUE.fullmatch(value):
+            raise NeteaseAuthError("Cookie 内容包含无效字符，请重新复制。")
+    return _cookies(values)
+
+
 class NeteaseAuth:
     """Open a first-party QR login and keep the resulting session on this Windows account."""
 
@@ -360,6 +382,21 @@ class NeteaseAuth:
         if code in (8821, 460, -460, -12):
             raise NeteaseAuthError("网易云音乐要求完成账号安全验证，请在官方应用确认后重新扫码。")
         raise NeteaseAuthError("网易云音乐返回了无效的扫码状态，请重新获取二维码。")
+
+    def login_with_cookies(self, cookie_text):
+        """Build a session from a browser's MUSIC_U cookie and persist it.
+
+        The browser login page can complete risk-control verification that the
+        QR poll cannot present, so this is the reliable fallback when the scan
+        returns 需要安全验证.
+        """
+        cookies = _cookie_values(cookie_text)
+        account = _account(cookies)
+        if account is None:
+            raise NeteaseAuthError("网易云音乐未接受这段 Cookie，请确认已在浏览器登录并复制完整。")
+        session = NeteaseSession(account.uid, cookies)
+        self.save(session)
+        return session
 
     def check(self, session):
         if not isinstance(session, NeteaseSession):
