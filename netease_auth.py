@@ -229,7 +229,7 @@ def _request(path, params=None, *, chain=None, jar=None, cookies=()):
             # The current web client wraps this route in an AES-ECB eapi envelope.
             url = _SITE + "/eapi/song/enhance/player/url/v1"
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-            data = _eapi_body(path, params)
+            data = b"params=" + _eapi_body(path, params)
         elif path == _PLAYER_LEGACY:
             # The legacy bitrate route now also requires an encrypted form POST.
             url = _SITE + "/weapi/song/enhance/player/url"
